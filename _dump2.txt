@@ -1,0 +1,92 @@
+LEN=10778
+setNotifOpen @line=19:   const [notifOpen, setNotifOpen] = useState(false)
+setNotifOpen @line=50:         setNotifOpen(false)
+setNotifOpen @line=68:         setNotifOpen(false)
+setNotifOpen @line=123:               setNotifOpen((prev) => !prev)
+setNotifOpen @line=153:               setNotifOpen(false)
+-- total setNotifOpen: 5
+BellIcon @line=7: import { ArrowLeft, AvatarIcon, BellIcon, HeartIcon, HistoryIcon, LanguageIcon, CalendarIcon, SettingsIcon, ShieldAlertIcon } from '../icons'
+BellIcon @line=130:             <BellIcon className="h-5 w-5" />
+-- total BellIcon: 2
+notifications.empty @line=141:                 {t('notifications.empty')}
+-- total notifications.empty: 1
+-- total NotificationBell: 0
+-- total const notifications: 0
+
+=== lines 100-175 ===
+100 |       />
+101 |       {/* Mobile search sits on its own row below */}
+102 |       <SearchBox className="relative z-30 order-3 mt-2 basis-full sm:hidden" />
+103 | 
+104 |       <div className="ms-auto flex shrink-0 items-center gap-2 sm:ms-0">
+105 |         <button
+106 |           type="button"
+107 |           onClick={toggleLang}
+108 |           className="flex h-11 items-center gap-1.5 rounded-full border border-night-600/60 bg-slate-900/60 px-3.5 text-xs font-bold text-slate-200 backdrop-blur-md transition hover:border-slate-400/60 hover:text-white"
+109 |           aria-label={t('nav.language')}
+110 |           title={t('nav.language')}
+111 |         >
+112 |           <LanguageIcon className="h-4 w-4" />
+113 |           {lang === 'ar' ? 'EN' : 'ع'}
+114 |         </button>
+115 | 
+116 |         {/* Notifications popover */}
+117 |         <div className="relative" ref={notifBoxRef} onClick={(e) => e.stopPropagation()}>
+118 |           <button
+119 |             type="button"
+120 |             onClick={(e) => {
+121 |               e.stopPropagation()
+122 |               setAccountOpen(false)
+123 |               setNotifOpen((prev) => !prev)
+124 |             }}
+125 |             aria-label={t('header.notifications')}
+126 |             title={t('header.notifications')}
+127 |             aria-expanded={notifOpen}
+128 |             className="flex h-11 w-11 items-center justify-center rounded-full border border-night-600/60 bg-slate-900/60 text-slate-300 backdrop-blur-md transition hover:border-slate-400/60 hover:text-white"
+129 |           >
+130 |             <BellIcon className="h-5 w-5" />
+131 |           </button>
+132 |           {notifOpen && (
+133 |             <div
+134 |               className="absolute right-0 mt-2 w-64 rounded-2xl border border-night-700/70 bg-night-850/80 backdrop-blur-md p-2 shadow-card z-50 animate-fade-in"
+135 |               onClick={(e) => e.stopPropagation()}
+136 |             >
+137 |               <div className="px-3 py-2 flex items-center justify-between border-b border-night-700/50 pb-2 mb-2">
+138 |                 <h3 className="text-sm font-semibold text-white">{t('header.notifications')}</h3>
+139 |               </div>
+140 |               <div className="px-3 py-4 text-center text-xs text-slate-400">
+141 |                 {t('notifications.empty')}
+142 |               </div>
+143 |             </div>
+144 |           )}
+145 |         </div>
+146 | 
+147 |         {/* Account menu */}
+148 |         <div className="relative" ref={accountBoxRef} onClick={(e) => e.stopPropagation()}>
+149 |           <button
+150 |             type="button"
+151 |             onClick={(e) => {
+152 |               e.stopPropagation()
+153 |               setNotifOpen(false)
+154 |               setAccountOpen((prev) => !prev)
+155 |             }}
+156 |             aria-label={t('header.profile')}
+157 |             title={t('header.profile')}
+158 |             aria-expanded={accountOpen}
+159 |             className="flex h-11 w-11 items-center justify-center rounded-full border border-night-600/60 bg-slate-900/60 text-slate-300 backdrop-blur-md transition hover:border-slate-400/60 hover:text-white"
+160 |           >
+161 |             <AvatarIcon className="h-5 w-5" />
+162 |           </button>
+163 |           {accountOpen && (
+164 |             <div
+165 |               className="absolute right-0 mt-2 w-56 rounded-2xl border border-night-700/70 bg-night-850/80 backdrop-blur-md p-3 shadow-card z-50 animate-fade-in"
+166 |               onClick={(e) => e.stopPropagation()}
+167 |             >
+168 |               <div className="px-2 py-2 flex items-center gap-3">
+169 |                 <div className="flex h-10 w-10 items-center justify-center rounded-full bg-night-700 text-white">
+170 |                   <AvatarIcon className="h-5 w-5" />
+171 |                 </div>
+172 |                 <div className="min-w-0">
+173 |                   <p className="text-sm font-semibold text-white truncate">{t('header.profile')}</p>
+174 |                   <p className="text-[11px] text-slate-400 truncate">
+175 |                     {favorites.length} {t('favorites.count').replace('{n}', String(favorites.length))}

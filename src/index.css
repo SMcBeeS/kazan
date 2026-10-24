@@ -1,0 +1,212 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-night-950 text-slate-100 font-sans antialiased;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    background-image:
+      radial-gradient(1200px 600px at 80% -10%, rgba(15, 23, 42, 0.15), transparent 60%),
+      radial-gradient(900px 500px at 0% 10%, rgba(30, 41, 59, 0.1), transparent 55%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+
+  * {
+    @apply border-night-700;
+  }
+
+  /* Force every Arabic-detected text element to render in Cairo. The provider
+     sets <html lang> and dir per language, so this covers ALL Arabic UI (nav,
+     labels, anime titles) as soon as the app switches to AR / RTL. */
+  html[lang='ar'],
+  html[lang='ar'] body {
+    @apply font-cairo;
+  }
+  [dir='rtl'] {
+    @apply font-cairo;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-slate-400/60 ring-offset-2 ring-offset-night-950;
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-display;
+    line-height: 1.35;
+  }
+}
+
+@layer components {
+  .container-page {
+    @apply mx-auto w-full max-w-[1400px] px-4 sm:px-6 lg:px-10;
+  }
+
+  .card-surface {
+    @apply rounded-2xl border border-night-700/70 bg-night-850/70 backdrop-blur-sm;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-white px-5 py-2.5
+      font-semibold text-night-900 shadow-glow-accent transition
+      hover:bg-slate-200 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-night-600/80
+      bg-night-800/70 px-5 py-2.5 font-semibold text-slate-200 transition
+      hover:border-slate-400/60 hover:bg-night-700/70 hover:text-white active:scale-[0.98];
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-night-600/70
+      bg-night-800/70 px-3 py-1 text-xs font-medium text-slate-300;
+  }
+
+  .link-underline {
+    @apply relative after:absolute after:-bottom-0.5 after:inset-x-0 after:h-0.5
+      after:origin-bottom after:scale-x-0 after:bg-slate-400 after:transition-transform
+      after:content-[''] hover:after:scale-x-100;
+  }
+
+  .ctrl {
+    @apply flex h-9 w-9 items-center justify-center rounded-lg text-white/90
+      transition hover:bg-white/10 hover:text-white;
+  }
+
+  .skeleton {
+    @apply relative overflow-hidden bg-night-800;
+    /* Promote the whole skeleton to its own GPU layer so the ::after shimmer
+       sweeps off the main thread (do not set `transform` on ::after itself —
+       that would be overridden by the shimmer keyframe animation). */
+    will-change: transform;
+    transform: translateZ(0);
+  }
+  .skeleton::after {
+    @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r
+      from-transparent via-white/5 to-transparent content-[''];
+  }
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .thin-scrollbar::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .thin-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .thin-scrollbar::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-night-600;
+  }
+  .thin-scrollbar::-webkit-scrollbar-thumb:hover {
+    @apply bg-white;
+  }
+
+  .text-shadow-lg {
+    text-shadow: 0 4px 24px rgba(0, 0, 0, 0.65);
+  }
+
+  /* --- Ambient sidebar portal (Edo/monochrome motif) --- */
+  @keyframes portal-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+  @keyframes portal-spin-rev {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(-360deg); }
+  }
+  @keyframes portal-float {
+    0%, 100% { transform: translateY(0); opacity: 0.9; }
+    50% { transform: translateY(-5px); opacity: 1; }
+  }
+  @keyframes portal-pulse {
+    0%, 100% { opacity: 0.25; transform: scale(0.95); }
+    50% { opacity: 0.6; transform: scale(1.05); }
+  }
+  .animate-portal-spin { animation: portal-spin 24s linear infinite; }
+  .animate-portal-spin-slow { animation: portal-spin 45s linear infinite; }
+  .animate-portal-orbit { animation: portal-spin 4.2s linear infinite; }
+  .animate-portal-spin-rev { animation: portal-spin-rev 32s linear infinite; }
+  .animate-portal-float { animation: portal-float 5s ease-in-out infinite; }
+  .animate-portal-pulse { animation: portal-pulse 4s ease-in-out infinite; }
+
+  /* Offload every CSS animation to the GPU: promote to compositor layers and
+     force hardware acceleration so continuous rotation/pulse/float never
+     triggers main-thread layout or paint (keeps pages locked at 60 FPS). */
+  .animate-portal-spin,
+  .animate-portal-spin-slow,
+  .animate-portal-orbit,
+  .animate-portal-spin-rev,
+  .animate-portal-float,
+  .animate-portal-pulse,
+  .animate-fade-in,
+  .animate-fade-up,
+  .animate-shimmer {
+    will-change: transform, opacity;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .animate-portal-spin,
+    .animate-portal-spin-slow,
+    .animate-portal-orbit,
+    .animate-portal-spin-rev,
+    .animate-portal-float,
+    .animate-portal-pulse { animation: none; }
+  }
+
+  /* --- Deliberate, noticeable page fade-out & fade-in transitions --- */
+  @keyframes page-out {
+    from { opacity: 1; transform: translateY(0) scale(1); }
+    to   { opacity: 0; transform: translateY(-8px) scale(0.99); }
+  }
+  @keyframes page-in {
+    from { opacity: 0; transform: translateY(14px) scale(0.99); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .page-exit {
+    animation: page-out 380ms cubic-bezier(0.4, 0, 0.2, 1) both;
+    will-change: opacity, transform;
+    pointer-events: none;
+  }
+  .page-enter {
+    animation: page-in 700ms cubic-bezier(0.25, 0.8, 0.25, 1) both;
+    will-change: opacity, transform;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .page-exit,
+    .page-enter { animation: none; }
+  }
+
+  [dir='rtl'] .flip-rtl {
+    transform: scaleX(-1);
+  }
+}
+
+video::cue {
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 1rem;
+}
