@@ -1,0 +1,25 @@
+﻿== AniPlayer/81/0 status=200 len=342496 ==
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="index, follow">
+    <meta name="description" content="Watch Naruto: Shippuden online for free on AniPub. It has been two and a half years since Naruto Uzumaki left Konohagakure, the Hidden Leaf Village, for intense training following events which fueled his desire to be stronger. Now Akatsuki, the mysterious organization of elite rogue ninja, is closing in on their grand plan which may threaten the safety of the entire shinobi world. Although Naruto is older and sinister events loom on the horizon, he has changed little 
+
+== AniPlayer/naruto-shippuden/0 status=200 len=342496 ==
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="index, follow">
+    <meta name="description" content="Watch Naruto: Shippuden online for free on AniPub. It has been two and a half years since Naruto Uzumaki left Konohagakure, the Hidden Leaf Village, for intense training following events which fueled his desire to be stronger. Now Akatsuki, the mysterious organization of elite rogue ninja, is closing in on their grand plan which may threaten the safety of the entire shinobi world. Although Naruto is older and sinister events loom on the horizon, he has changed little 
+
+== api/findbyrating status=200 len=13472 ==
+
+{"currentPage":1,"AniData":[{"_id":8329,"Name":"Dorohedoro Season 2","finder":"dorohedoro-season-2","ImagePath":"https://cdn.anipixcdn.co/thumbnail/2fca89aef2c792cb67c316a669ffe591.jpg","MALScore":"9.75","RatingsNum":50,"DescripTion":"The second season of Dorohedoro. The anarchy continues as Caiman inches closer to the truth behind his cursed appearance and the mystery around the Cross-Eyes' boss begins to unravel. [more] The second season of Dorohedoro. The anarchy continues as Caiman inches closer to the truth behind his cursed appearance and the mystery around the Cross-Eyes' boss begins to unravel."},{"_id":8336,"Name":"Dr. Stone: Science Future Part 3","finder":"dr-stone-science-future-

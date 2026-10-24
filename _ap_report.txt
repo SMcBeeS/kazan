@@ -1,0 +1,18 @@
+LEN=342496
+TITLE: <h1 class="video-title">Naruto: Shippuden</h1>
+--- poster imgs ---
+https://www.anipub.org/Logo-1-AniPub.png
+https://cdn.myanimelist.net/images/anime/1486/153135.jpg
+/rating-35.png
+https://cdn.myanimelist.net/images/anime/3/74045.jpg
+/rating-35.png
+https://www.manga-news.com/public/images/dvd/beast-tamer-anime.jpg
+/rating-35.png
+https://images.justwatch.com/poster/247199195/s718/that-time-i-got-reincarnated-as-a-slime.jpg
+/rating-40.png
+https://digitalcrime.news/wp-content/uploads/2021/10/That-Time-I-Got-Reincarnated-As-A-Slime-Movie-2022-Anime-Key-Visual-1-722x1024.jpg
+--- data-ep count ---
+count=500 max=499
+--- score markup ---
+mal
+score

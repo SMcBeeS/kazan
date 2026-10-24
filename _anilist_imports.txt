@@ -1,0 +1,20 @@
+﻿\src\components\anime\HomeSections.tsx >> import { anilist } from '../../lib/anilist'
+\src\components\anime\RelationsSection.tsx >> import { anilist } from '../../lib/anilist'
+\src\components\layout\SearchBox.tsx >> import { anilist, type AnimeSuggestion } from '../../lib/anilist'
+\src\lib\notifications.ts >> import { anilist } from './anilist'
+\src\lib\translate.ts >> * IMPORTANT / HONESTY: This is *machine* translation of AniList's English text.
+\src\lib\utils.ts >> * Best available wide banner/backdrop image. Prefers AniList's dedicated
+\src\lib\utils.ts >> * Safely strip AniList's HTML-ish markup (`<br>`, `<i>`, `<b>`, `<p>`, â€¦) from a
+\src\pages\AdminPage.tsx >> import { anilist } from '../lib/anilist'
+\src\pages\AnimeDetailPage.tsx >> import { anilist } from '../lib/anilist'
+\src\pages\AnimeDetailPage.tsx >> * AniList's API does not return Crunchyroll award data, so this is a small
+\src\pages\CatalogPage.tsx >> import { anilist, currentSeason } from '../lib/anilist'
+\src\pages\CatalogPage.tsx >> import type { ListParams } from '../lib/anilist'
+\src\pages\HomePage.tsx >> import { anilist } from '../lib/anilist'
+\src\pages\ProfilePage.tsx >> import { fetchAnimeMetadata } from '../lib/anilist'
+\src\pages\ProfilePage.tsx >> import type { AnimeMeta } from '../lib/anilist'
+\src\pages\PublicProfilePage.tsx >> import { fetchAnimeMetadata } from '../lib/anilist'
+\src\pages\PublicProfilePage.tsx >> import type { AnimeMeta } from '../lib/anilist'
+\src\pages\SchedulePage.tsx >> import { anilist, type UpcomingAnime } from '../lib/anilist'
+\src\pages\SchedulePage.tsx >> * range to hand to AniList's `airingAt_greater` / `airingAt_lesser` filter.
+\src\pages\WatchPage.tsx >> import { anilist } from '../lib/anilist'

@@ -1,0 +1,230 @@
+﻿1	/**
+2	 * Kazan â€” Shared domain types
+3	 *
+4	 * These are the normalized shapes the UI relies on. They were originally modeled
+5	 * on the Jikan v4 API (hence the `Jikan*` type names, kept for continuity); the
+6	 * data layer now sources them from the AniList GraphQL API via `lib/anilist.ts`.
+7	 */
+8	
+9	export interface JikanImage {
+10	  image_url: string
+11	  small_image_url?: string
+12	  large_image_url?: string
+13	}
+14	
+15	export interface JikanTitle {
+16	  type: string
+17	  title: string
+18	}
+19	
+20	export interface JikanAiredDate {
+21	  day: number | null
+22	  month: number | null
+23	  year: number | null
+24	}
+25	
+26	export interface JikanAired {
+27	  from: string | null
+28	  to: string | null
+29	  string?: string
+30	  prop: { from: JikanAiredDate; to: JikanAiredDate }
+31	}
+32	
+33	export interface JikanGenre {
+34	  mal_id: number
+35	  name: string
+36	  url?: string
+37	  count?: number
+38	}
+39	
+40	/** A genre / category entry (from /genres/anime, or a genre on an anime). */
+41	export type Genre = JikanGenre
+42	
+43	export interface JikanStudio {
+44	  mal_id: number
+45	  name: string
+46	  type?: string
+47	  url?: string
+48	}
+49	
+50	export interface JikanTrailer {
+51	  youtube_id: string | null
+52	  url: string | null
+53	  embed_url: string | null
+54	  images?: JikanImage
+55	}
+56	
+57	/** Summary item returned by list endpoints (/anime, /top/anime, /seasons/now â€¦) */
+58	export interface AnimeSummary {
+59	  mal_id: number
+60	  url: string
+61	  images: { webp?: JikanImage; jpg: JikanImage }
+62	  approved?: boolean
+63	  titles?: JikanTitle[]
+64	  title: string
+65	  title_english: string | null
+66	  title_japanese: string | null
+67	  type: string | null
+68	  /**
+69	   * Raw AniList format enum (e.g. "TV", "MOVIE", "OVA", "SPECIAL"). Used by the
+70	   * UI to special-case movies (runtime instead of episode counts).
+71	   */
+72	  format?: string | null
+73	  source: string
+74	  episodes: number | null
+75	  status: string | null
+76	  airing: boolean
+77	  aired: JikanAired
+78	  duration: string
+79	  rating: string | null
+80	  score: number | null
+81	  scored_by: number | null
+82	  rank: number | null
+83	  popularity: number | null
+84	  members: number | null
+85	  favorites: number | null
+86	  synopsis: string | null
+87	  season: string | null
+88	  year: number | null
+89	  studios: JikanStudio[]
+90	  genres: JikanGenre[]
+91	  themes?: JikanGenre[]
+92	  demographics?: JikanGenre[]
+93	  /**
+94	   * Wide cinematic banner image (AniList `bannerImage`) when available. Preferred
+95	   * for hero/backdrop backgrounds; falls back to the poster via utils.bannerImage().
+96	   */
+97	  bannerImage?: string | null
+98	  /**
+99	   * Next episode scheduled to air (AniList `nextAiringEpisode`). Used to
+100	   * distinguish already-released episodes from upcoming ones.
+101	   */
+102	  nextAiringEpisode?: { episode: number; airingAt: number | null } | null
+103	}
+104	
+105	/** Full anime detail returned by /anime/{id}/full */
+106	export interface AnimeDetail extends AnimeSummary {
+107	  title_synonyms: string[]
+108	  background: string | null
+109	  trailer: JikanTrailer
+110	  producers: JikanStudio[]
+111	  licensors: JikanStudio[]
+112	  explicit: boolean
+113	  broadcast: { day: string | null; time: string | null; timezone: string | null; string: string | null }
+114	}
+115	
+116	export interface Episode {
+117	  mal_id: number
+118	  title: string | null
+119	  title_japanese: string | null
+120	  title_romanji: string | null
+121	  aired: string | null
+122	  score: number | null
+123	  filler: boolean
+124	  recap: boolean
+125	  forum_url: string | null
+126	  url: string | null
+127	  /**
+128	   * True when this episode has not aired yet (its number is at or beyond the
+129	   * series' `nextAiringEpisode.episode`). Derived in lib/anilist so the UI can
+130	   * badge upcoming episodes and disable clicking them.
+131	   */
+132	  upcoming?: boolean
+133	}
+134	
+135	/**
+136	 * A single related title as returned by /anime/{id}/relations.
+137	 * Relations entries are lightweight summaries (no score/episodes), so they use
+138	 * a dedicated compact shape rather than AnimeSummary.
+139	 */
+140	export interface JikanRelationEntry {
+141	  mal_id: number
+142	  url: string
+143	  images: { jpg: JikanImage; webp?: JikanImage }
+144	  name: string
+145	}
+146	
+147	/** A relation group, e.g. "Sequel", "Prequel", "Side Story", "Parent Story". */
+148	export interface JikanRelation {
+149	  relation: string
+150	  entry: JikanRelationEntry[]
+151	}
+152	
+153	/** A single picture returned by /anime/{id}/pictures. */
+154	export interface JikanPicture {
+155	  jpg: JikanImage
+156	  webp?: JikanImage
+157	}
+158	
+159	export interface ScheduleEntry {
+160	  mal_id: number
+161	  title: string
+162	  url: string
+163	  images: { jpg: JikanImage }
+164	  synopsis: string | null
+165	  episodes?: Episode[]
+166	  /** Broadcast metadata unique to schedule entries */
+167	  broadcast?: { day: string | null; time: string | null; timezone: string | null; string: string | null }
+168	  /** Raw title forms carried by schedule entries so pages can filter locally. */
+169	  romaji?: string | null
+170	  english?: string | null
+171	  /** UNIX seconds (UTC) of the aired timestamp for precise day grouping. */
+172	  airingAt?: number | null
+173	}
+174	
+175	/** Generic paginated API envelope (data + pagination) */
+176	export interface Paginated<T> {
+177	  data: T[]
+178	  pagination: {
+179	    last_visible_page: number
+180	    has_next_page: boolean
+181	    current_page: number
+182	    items: { count: number; total: number; per_page: number }
+183	  }
+184	}
+185	
+186	/** Envelope without pagination (e.g. /genres/anime) */
+187	export interface SimpleList<T> {
+188	  data: T[]
+189	}
+190	
+191	/* ---------- Video-source domain types (see lib/videoSources.ts) ---------- */
+192	
+193	export type VideoSourceKind = 'embed' | 'direct'
+194	
+195	export type VideoQuality = {
+196	  /** Human label e.g. "1080p", "720p", "Auto" */
+197	  label: string
+198	  /** Direct URL for this rendition (only meaningful for `direct` sources) */
+199	  url?: string
+200	  /** Height in px when known (used for sorting / hls.js level matching) */
+201	  height?: number
+202	}
+203	
+204	export type SubtitleTrack = {
+205	  /** ISO-ish code, e.g. "ar", "en" */
+206	  srclang: string
+207	  label: string
+208	  /** URL to the subtitle file (.vtt preferred; .srt/.ass converted client-side) */
+209	  src: string
+210	  /** Original file format for conversion handling */
+211	  format: 'vtt' | 'srt' | 'ass'
+212	  default?: boolean
+213	}
+214	
+215	export type VideoSource = {
+216	  id: string
+217	  /** Display name of the provider, e.g. "Server 1", "Primary CDN" */
+218	  label: string
+219	  kind: VideoSourceKind
+220	  /** For embed sources: iframe src. For direct sources: default/highest rendition URL. */
+221	  url: string
+222	  /** Optional poster override */
+223	  poster?: string
+224	  /** Available qualities (direct sources); embeds manage their own quality UI */
+225	  qualities?: VideoQuality[]
+226	  /** Subtitle tracks attached to this source */
+227	  subtitles?: SubtitleTrack[]
+228	  /** Notes such as licensing/availability reasons, shown to the user */
+229	  note?: string
+230	}

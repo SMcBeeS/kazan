@@ -1,0 +1,82 @@
+﻿===== ListParams =====
+L$($j+1): export interface ListParams {
+L$($j+1):   q?: string
+L$($j+1):   page?: number
+L$($j+1):   limit?: number
+L$($j+1):   order_by?: string
+L$($j+1):   sort?: 'asc' | 'desc'
+L$($j+1):   type?: string
+L$($j+1):   status?: string
+L$($j+1):   rating?: string
+L$($j+1):   genres?: string
+L$($j+1):   genre?: string
+L$($j+1):   tags?: string
+L$($j+1):   min_score?: number
+L$($j+1):   max_score?: number
+L$($j+1):   start_date?: string
+L$($j+1):   end_date?: string
+L$($j+1):   sfw?: boolean
+L$($j+1):   letter?: string
+L$($j+1):   verify_pagination?: boolean
+L$($j+1):   /** AniList season, e.g. 'WINTER' | 'SPRING' | 'SUMMER' | 'FALL'. */
+L$($j+1):   season?: string
+L$($j+1):   /** Calendar year (4-digit). Paired with `season` to narrow a specific season. */
+===== UpcomingAnime =====
+(not found: UpcomingAnime)
+===== Episode =====
+L$($j+1): export interface Episode {
+L$($j+1):   mal_id: number
+L$($j+1):   title: string | null
+L$($j+1):   title_japanese: string | null
+L$($j+1):   title_romanji: string | null
+L$($j+1):   aired: string | null
+L$($j+1):   score: number | null
+L$($j+1):   filler: boolean
+L$($j+1):   recap: boolean
+L$($j+1):   forum_url: string | null
+L$($j+1):   url: string | null
+L$($j+1):   /**
+L$($j+1):    * True when this episode has not aired yet (its number is at or beyond the
+L$($j+1):    * series' `nextAiringEpisode.episode`). Derived in lib/anilist so the UI can
+L$($j+1):    * badge upcoming episodes and disable clicking them.
+L$($j+1):    */
+===== GetRecommendations =====
+L$($j+1):   getRecommendations(
+L$($j+1):     id: number,
+L$($j+1):     signal?: AbortSignal,
+L$($j+1):   ): Promise<SimpleList<{ entry: AnimeSummary }>> {
+L$($j+1):     interface Node {
+L$($j+1):       mediaRecommendation: AniListMedia | null
+L$($j+1):     }
+L$($j+1):     interface Resp {
+L$($j+1):       Media: { recommendations: { nodes: Node[] } | null }
+L$($j+1):     }
+L$($j+1):     return gql<Resp>(RECOMMENDATIONS_QUERY, { variables: { id }, signal }).then((r) => ({
+L$($j+1):       data: (r.Media.recommendations?.nodes ?? [])
+===== GetEpisodes =====
+L$($j+1):   getEpisodes(id: number, page = 1, signal?: AbortSignal): Promise<Paginated<Episode>> {
+L$($j+1):     const perPage = 50
+L$($j+1):     interface Resp {
+L$($j+1):       Media: {
+L$($j+1):         episodes: number | null
+L$($j+1):         status: string | null
+===== GetUpcoming =====
+L$($j+1):   getUpcoming(limit = 10, signal?: AbortSignal): Promise<SimpleList<UpcomingAnime>> {
+L$($j+1):     return gql<UpcomingResp>(UPCOMING_QUERY, {
+L$($j+1):       variables: { perPage: limit },
+L$($j+1):       ttl: TTL.season,
+L$($j+1):       signal,
+L$($j+1):     }).then((r) => ({
+L$($j+1):       data: (r.Page?.media ?? []).map((n) => ({
+L$($j+1):         id: n.id,
+L$($j+1):         title: n.title.english || n.title.romaji || n.title.native || '',
+L$($j+1):         coverImage: n.coverImage?.large ?? null,
+L$($j+1):         season: n.season ?? null,
+L$($j+1):         seasonYear: n.seasonYear ?? null,
+L$($j+1):       })),
+L$($j+1):     }))
+L$($j+1):   },
+L$($j+1): 
+L$($j+1):   getGenres(signal?: AbortSignal): Promise<SimpleList<Genre>> {
+L$($j+1):     interface Resp {
+

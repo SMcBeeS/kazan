@@ -1,0 +1,1353 @@
+﻿1	/**
+2	 * anilist.ts â€” GraphQL client for the official AniList API (https://anilist.co).
+3	 */
+4	
+5	import type {
+6	  AnimeDetail,
+7	  AnimeSummary,
+8	  Episode,
+9	  Genre,
+10	  JikanAired,
+11	  JikanAiredDate,
+12	  JikanImage,
+13	  JikanRelation,
+14	  JikanRelationEntry,
+15	  JikanStudio,
+16	  JikanTrailer,
+17	  Paginated,
+18	  ScheduleEntry,
+19	  SimpleList,
+20	} from './types'
+21	
+22	const BASE_URL = 'https://graphql.anilist.co'
+23	
+24	const TTL = {
+25	  default: 30 * 60 * 1000, // 30 minutes
+26	  genres: 24 * 60 * 60 * 1000, // 24 hours
+27	  season: 60 * 60 * 1000, // 60 minutes
+28	}
+29	
+30	const MIN_INTERVAL = 350
+31	const MAX_RETRIES = 3
+32	
+33	export class AniListError extends Error {
+34	  status: number
+35	  constructor(message: string, status = 0) {
+36	    super(message)
+37	    this.name = 'AniListError'
+38	    this.status = status
+39	  }
+40	}
+41	
+42	/* ------------------------------- throttling ------------------------------ */
+43	
+44	let lastRequestAt = 0
+45	const queue: Array<() => void> = []
+46	let draining = false
+47	
+48	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+49	
+50	async function drain() {
+51	  if (draining) return
+52	  draining = true
+53	  while (queue.length > 0) {
+54	    const now = Date.now()
+55	    const wait = Math.max(0, MIN_INTERVAL - (now - lastRequestAt))
+56	    if (wait > 0) await sleep(wait)
+57	    lastRequestAt = Date.now()
+58	    const next = queue.shift()
+59	    next?.()
+60	  }
+61	  draining = false
+62	}
+63	
+64	function schedule<T>(task: () => Promise<T>): Promise<T> {
+65	  return new Promise<T>((resolve, reject) => {
+66	    queue.push(() => {
+67	      task().then(resolve, reject)
+68	    })
+69	    void drain()
+70	  })
+71	}
+72	
+73	/* --------------------- persistent localStorage caching ------------------- */
+74	
+75	interface CacheEntry {
+76	  value: unknown
+77	  expires: number
+78	}
+79	
+80	const memoryCache = new Map<string, CacheEntry>()
+81	const inflight = new Map<string, Promise<unknown>>()
+82	
+83	function readStorage(key: string, allowStale = false): unknown | undefined {
+84	  try {
+85	    const raw = localStorage.getItem(key)
+86	    if (!raw) return undefined
+87	    const parsed = JSON.parse(raw) as CacheEntry
+88	    if (!allowStale && Date.now() > parsed.expires) {
+89	      return undefined
+90	    }
+91	    return parsed.value
+92	  } catch {
+93	    return undefined
+94	  }
+95	}
+96	
+97	function writeStorage(key: string, value: unknown, ttl: number) {
+98	  try {
+99	    const entry: CacheEntry = { value, expires: Date.now() + ttl }
+100	    localStorage.setItem(key, JSON.stringify(entry))
+101	  } catch {
+102	    /* non-fatal */
+103	  }
+104	}
+105	
+106	function cacheGet<T>(key: string, allowStale = false): T | undefined {
+107	  const mem = memoryCache.get(key)
+108	  if (mem && (allowStale || Date.now() < mem.expires)) return mem.value as T
+109	  const stored = readStorage(key, allowStale)
+110	  if (stored !== undefined) {
+111	    memoryCache.set(key, { value: stored, expires: Date.now() + TTL.default })
+112	    return stored as T
+113	  }
+114	  return undefined
+115	}
+116	
+117	function cacheSet<T>(key: string, value: T, ttl: number) {
+118	  memoryCache.set(key, { value, expires: Date.now() + ttl })
+119	  writeStorage(key, value, ttl)
+120	}
+121	
+122	/* -------------------------------- requests ------------------------------- */
+123	
+124	interface GqlOptions {
+125	  variables?: Record<string, unknown>
+126	  ttl?: number
+127	  signal?: AbortSignal
+128	}
+129	
+130	function friendlyNetworkMessage(err: unknown): string {
+131	  if (err instanceof DOMException && err.name === 'AbortError') return 'aborted'
+132	  return 'Could not reach AniList right now. Please try again in a moment.'
+133	}
+134	
+135	async function gql<T>(query: string, opts: GqlOptions = {}): Promise<T> {
+136	  const { variables, ttl = TTL.default, signal } = opts
+137	
+138	  let hash = 0x811c9dc5
+139	  const rawKey = `${query}::${JSON.stringify(variables ?? {})}`
+140	  for (let i = 0; i < rawKey.length; i++) {
+141	    hash ^= rawKey.charCodeAt(i)
+142	    hash = Math.imul(hash, 0x01000193)
+143	  }
+144	  const cacheKey = `kazan_cache_${(hash >>> 0).toString(36)}`
+145	
+146	  const cached = cacheGet<T>(cacheKey, false)
+147	  if (cached !== undefined) return cached
+148	
+149	  const existing = inflight.get(cacheKey)
+150	  if (existing) return existing as Promise<T>
+151	
+152	  const requestPromise = (async (): Promise<T> => {
+153	    let attempt = 0
+154	    while (true) {
+155	      try {
+156	        return await schedule(async () => {
+157	          const res = await fetch(BASE_URL, {
+158	            method: 'POST',
+159	            headers: {
+160	              'Content-Type': 'application/json',
+161	              Accept: 'application/json',
+162	            },
+163	            body: JSON.stringify({ query, variables }),
+164	            signal,
+165	          })
+166	          if (res.status === 429) throw new AniListError('rate-limited', 429)
+167	          if (!res.ok) throw new AniListError(`AniList responded with ${res.status}`, res.status)
+168	          const json = (await res.json()) as { data?: T; errors?: { message: string }[] }
+169	          if (json.errors && json.errors.length > 0) {
+170	            throw new AniListError(json.errors[0]?.message ?? 'GraphQL error', res.status)
+171	          }
+172	          if (!json.data) throw new AniListError('Empty response', res.status)
+173	          cacheSet(cacheKey, json.data, ttl)
+174	          return json.data
+175	        })
+176	      } catch (err) {
+177	        if (signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+178	          throw new AniListError('aborted', 0)
+179	        }
+180	        const status = err instanceof AniListError ? err.status : 0
+181	        attempt += 1
+182	
+183	        const retryable = status === 0 || status === 429 || (status >= 500 && status < 600)
+184	        if (retryable && attempt <= MAX_RETRIES) {
+185	          await sleep(1200 * attempt)
+186	          continue
+187	        }
+188	
+189	        const stale = cacheGet<T>(cacheKey, true)
+190	        if (stale !== undefined) return stale
+191	
+192	        if (err instanceof AniListError) throw err
+193	        throw new AniListError(friendlyNetworkMessage(err), 0)
+194	      }
+195	    }
+196	  })()
+197	
+198	  inflight.set(cacheKey, requestPromise)
+199	  try {
+200	    return await requestPromise
+201	  } finally {
+202	    inflight.delete(cacheKey)
+203	  }
+204	}
+205	
+206	/* ------------------------------ AniList raw ------------------------------ */
+207	
+208	interface AniListFuzzyDate {
+209	  year: number | null
+210	  month: number | null
+211	  day: number | null
+212	}
+213	
+214	interface AniListCoverImage {
+215	  extraLarge: string | null
+216	  large: string | null
+217	  medium: string | null
+218	  color: string | null
+219	}
+220	
+221	interface AniListTitle {
+222	  romaji: string | null
+223	  english: string | null
+224	  native: string | null
+225	}
+226	
+227	interface AniListTrailerRaw {
+228	  id: string | null
+229	  site: string | null
+230	  thumbnail: string | null
+231	}
+232	
+233	interface AniListRanking {
+234	  rank: number
+235	  type: string
+236	  allTime: boolean
+237	  context: string
+238	}
+239	
+240	interface AniListNextAiringEpisode {
+241	  episode: number
+242	  airingAt: number
+243	}
+244	
+245	interface AniListMedia {
+246	  id: number
+247	  idMal: number | null
+248	  title: AniListTitle
+249	  description: string | null
+250	  coverImage: AniListCoverImage
+251	  bannerImage: string | null
+252	  averageScore: number | null
+253	  meanScore: number | null
+254	  episodes: number | null
+255	  duration: number | null
+256	  status: string | null
+257	  format: string | null
+258	  season: string | null
+259	  seasonYear: number | null
+260	  genres: string[] | null
+261	  popularity: number | null
+262	  favourites: number | null
+263	  isAdult: boolean | null
+264	  siteUrl: string | null
+265	  source: string | null
+266	  startDate: AniListFuzzyDate
+267	  endDate: AniListFuzzyDate
+268	  synonyms: string[] | null
+269	  trailer: AniListTrailerRaw | null
+270	  studios: { nodes: { id: number; name: string }[] }
+271	  rankings: AniListRanking[]
+272	  nextAiringEpisode: AniListNextAiringEpisode | null
+273	}
+274	
+275	interface AniListRelationsNode {
+276	  id: number
+277	  siteUrl: string | null
+278	  format: string | null
+279	  coverImage: AniListCoverImage
+280	  title: AniListTitle
+281	}
+282	
+283	interface PageInfo {
+284	  total: number
+285	  currentPage: number
+286	  lastPage: number
+287	  hasNextPage: boolean
+288	  perPage: number
+289	}
+290	
+291	const MEDIA_CORE_FIELDS = `
+292	  id
+293	  idMal
+294	  title { romaji english native }
+295	  description(asHtml: false)
+296	  coverImage { extraLarge large medium color }
+297	  bannerImage
+298	  averageScore
+299	  meanScore
+300	  episodes
+301	  duration
+302	  status
+303	  format
+304	  season
+305	  seasonYear
+306	  genres
+307	  popularity
+308	  favourites
+309	  isAdult
+310	  siteUrl
+311	  source
+312	  startDate { year month day }
+313	  endDate { year month day }
+314	  synonyms
+315	  trailer { id site thumbnail }
+316	  studios(isMain: true) { nodes { id name } }
+317	  rankings { rank type allTime context }
+318	  nextAiringEpisode { episode airingAt }
+319	`
+320	
+321	const KNOWN_GENRES = [
+322	  'Action',
+323	  'Adventure',
+324	  'Comedy',
+325	  'Drama',
+326	  'Ecchi',
+327	  'Fantasy',
+328	  'Hentai',
+329	  'Horror',
+330	  'Mahou Shoujo',
+331	  'Mecha',
+332	  'Music',
+333	  'Mystery',
+334	  'Psychological',
+335	  'Romance',
+336	  'Sci-Fi',
+337	  'Slice of Life',
+338	  'Sports',
+339	  'Supernatural',
+340	  'Thriller',
+341	]
+342	
+343	const genreIdByName = new Map<string, number>()
+344	const genreNameById = new Map<number, string>()
+345	KNOWN_GENRES.forEach((name, i) => {
+346	  const id = i + 1
+347	  genreIdByName.set(name, id)
+348	  genreNameById.set(id, name)
+349	})
+350	let nextGenreId = KNOWN_GENRES.length + 1
+351	
+352	function genreId(name: string): number {
+353	  const existing = genreIdByName.get(name)
+354	  if (existing != null) return existing
+355	  const id = nextGenreId++
+356	  genreIdByName.set(name, id)
+357	  genreNameById.set(id, name)
+358	  return id
+359	}
+360	
+361	function genreName(id: number): string | null {
+362	  return genreNameById.get(id) ?? null
+363	}
+364	
+365	const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+366	const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+367	
+368	const pad2 = (n: number): string => String(n).padStart(2, '0')
+369	
+370	function fuzzyToIso(d?: AniListFuzzyDate | null): string | null {
+371	  if (!d || !d.year) return null
+372	  return `${d.year}-${pad2(d.month ?? 1)}-${pad2(d.day ?? 1)}`
+373	}
+374	
+375	function fuzzyToString(d?: AniListFuzzyDate | null): string {
+376	  if (!d || !d.year) return ''
+377	  const month = d.month ? MONTHS[d.month - 1] : ''
+378	  if (month && d.day) return `${month} ${d.day}, ${d.year}`
+379	  if (month) return `${month} ${d.year}`
+380	  return String(d.year)
+381	}
+382	
+383	function mapAired(start?: AniListFuzzyDate | null, end?: AniListFuzzyDate | null): JikanAired {
+384	  const fromStr = fuzzyToString(start)
+385	  const toStr = fuzzyToString(end)
+386	  let string: string
+387	  if (fromStr && toStr) string = `${fromStr} to ${toStr}`
+388	  else if (fromStr) string = `${fromStr} to ?`
+389	  else string = toStr || 'â€”'
+390	  const toProp = (d?: AniListFuzzyDate | null): JikanAiredDate => ({
+391	    day: d?.day ?? null,
+392	    month: d?.month ?? null,
+393	    year: d?.year ?? null,
+394	  })
+395	  return {
+396	    from: fuzzyToIso(start),
+397	    to: fuzzyToIso(end),
+398	    string,
+399	    prop: { from: toProp(start), to: toProp(end) },
+400	  }
+401	}
+402	
+403	function mapStatus(status?: string | null): string | null {
+404	  switch (status) {
+405	    case 'RELEASING':
+406	      return 'Currently Airing'
+407	    case 'FINISHED':
+408	      return 'Finished Airing'
+409	    case 'NOT_YET_RELEASED':
+410	      return 'Not yet aired'
+411	    case 'CANCELLED':
+412	      return 'Cancelled'
+413	    case 'HIATUS':
+414	      return 'On Hiatus'
+415	    default:
+416	      return status ?? null
+417	  }
+418	}
+419	
+420	function humanizeEnum(value?: string | null): string {
+421	  if (!value) return ''
+422	  return value
+423	    .toLowerCase()
+424	    .replace(/_/g, ' ')
+425	    .replace(/\b\w/g, (c) => c.toUpperCase())
+426	}
+427	
+428	function cleanDescription(html?: string | null): string | null {
+429	  if (!html) return null
+430	  const text = html
+431	    .replace(/<br\s*\/?>/gi, '\n')
+432	    .replace(/<\/p>/gi, '\n\n')
+433	    .replace(/<[^>]+>/g, '')
+434	    .replace(/&amp;/g, '&')
+435	    .replace(/&lt;/g, '<')
+436	    .replace(/&gt;/g, '>')
+437	    .replace(/&quot;/g, '"')
+438	    .replace(/&#039;/g, "'")
+439	    .replace(/\n{3,}/g, '\n\n')
+440	    .trim()
+441	  return text || null
+442	}
+443	
+444	function coverImageToJikanImage(cover: AniListCoverImage): JikanImage {
+445	  return {
+446	    image_url: cover.large || cover.medium || '',
+447	    small_image_url: cover.medium || cover.large || '',
+448	    large_image_url: cover.extraLarge || cover.large || '',
+449	  }
+450	}
+451	
+452	function pickRank(rankings?: AniListRanking[]): number | null {
+453	  if (!rankings || rankings.length === 0) return null
+454	  const best = rankings.find((r) => r.type === 'RATED' && r.allTime && /highest/i.test(r.context))
+455	  if (best) return best.rank
+456	  const anyRated = rankings.find((r) => r.type === 'RATED')
+457	  return anyRated?.rank ?? null
+458	}
+459	
+460	function mapTrailer(trailer?: AniListTrailerRaw | null): JikanTrailer {
+461	  if (trailer && trailer.id && trailer.site === 'youtube') {
+462	    return {
+463	      youtube_id: trailer.id,
+464	      url: `https://www.youtube.com/watch?v=${trailer.id}`,
+465	      embed_url: `https://www.youtube.com/embed/${trailer.id}`,
+466	    }
+467	  }
+468	  return { youtube_id: null, url: null, embed_url: null }
+469	}
+470	
+471	function mapStudios(media: AniListMedia): JikanStudio[] {
+472	  return (media.studios?.nodes ?? []).map((n) => ({ mal_id: n.id, name: n.name, type: 'studio' }))
+473	}
+474	
+475	function mapGenres(names?: string[] | null): Genre[] {
+476	  return (names ?? []).map((name) => ({ mal_id: genreId(name), name }))
+477	}
+478	
+479	function mapSummary(m: AniListMedia): AnimeSummary {
+480	  const images = { jpg: coverImageToJikanImage(m.coverImage) }
+481	  return {
+482	    mal_id: m.id,
+483	    url: m.siteUrl || `https://anilist.co/anime/${m.id}`,
+484	    images,
+485	    approved: true,
+486	    title: m.title.english || m.title.romaji || m.title.native || '',
+487	    title_english: m.title.english,
+488	    title_japanese: m.title.native,
+489	    type: m.format ? m.format.replace(/_/g, ' ') : null,
+490	    format: m.format ?? null,
+491	    source: m.source ? humanizeEnum(m.source) : '',
+492	    episodes: m.episodes ?? null,
+493	    status: mapStatus(m.status),
+494	    airing: m.status === 'RELEASING',
+495	    aired: mapAired(m.startDate, m.endDate),
+496	    duration: m.duration ? (m.format === 'MOVIE' ? `${m.duration} min` : `${m.duration} min per ep`) : '',
+497	    rating: m.isAdult ? 'R - 17+' : null,
+498	    score: m.averageScore != null ? m.averageScore / 10 : null,
+499	    scored_by: null,
+500	    rank: pickRank(m.rankings),
+501	    popularity: m.popularity ?? null,
+502	    members: null,
+503	    favorites: m.favourites ?? null,
+504	    synopsis: cleanDescription(m.description),
+505	    season: m.season ? m.season.toLowerCase() : null,
+506	    year: m.seasonYear ?? null,
+507	    bannerImage: m.bannerImage ?? null,
+508	    nextAiringEpisode: m.nextAiringEpisode
+509	      ? { episode: m.nextAiringEpisode.episode, airingAt: m.nextAiringEpisode.airingAt }
+510	      : null,
+511	    studios: mapStudios(m),
+512	    genres: mapGenres(m.genres),
+513	  }
+514	}
+515	
+516	function mapDetail(m: AniListMedia): AnimeDetail {
+517	  return {
+518	    ...mapSummary(m),
+519	    title_synonyms: m.synonyms ?? [],
+520	    background: null,
+521	    trailer: mapTrailer(m.trailer),
+522	    producers: [],
+523	    licensors: [],
+524	    explicit: Boolean(m.isAdult),
+525	    broadcast: { day: null, time: null, timezone: null, string: null },
+526	  }
+527	}
+528	
+529	function isoFromUnix(seconds?: number | null): string | null {
+530	  if (seconds == null) return null
+531	  return new Date(seconds * 1000).toISOString()
+532	}
+533	
+534	function mapRelationEdges(
+535	  edges: { relationType: string | null; node: AniListRelationsNode }[],
+536	): JikanRelation[] {
+537	  const groups = new Map<string, JikanRelationEntry[]>()
+538	  for (const edge of edges) {
+539	    const label = humanizeEnum(edge.relationType) || 'Related'
+540	    const node = edge.node
+541	    const entry: JikanRelationEntry = {
+542	      mal_id: node.id,
+543	      url: node.siteUrl || `https://anilist.co/anime/${node.id}`,
+544	      images: { jpg: coverImageToJikanImage(node.coverImage) },
+545	      name: node.title.english || node.title.romaji || node.title.native || '',
+546	    }
+547	    const list = groups.get(label) ?? []
+548	    list.push(entry)
+549	    groups.set(label, list)
+550	  }
+551	  return Array.from(groups, ([relation, entry]) => ({ relation, entry }))
+552	}
+553	
+554	function toPaginated(pageInfo: PageInfo, media: AniListMedia[]): Paginated<AnimeSummary> {
+555	  const items = media.map(mapSummary)
+556	  return {
+557	    data: items,
+558	    pagination: {
+559	      last_visible_page: pageInfo.lastPage,
+560	      has_next_page: pageInfo.hasNextPage,
+561	      current_page: pageInfo.currentPage,
+562	      items: { count: items.length, total: pageInfo.total, per_page: pageInfo.perPage },
+563	    },
+564	  }
+565	}
+566	
+567	const MEDIA_BY_ID_QUERY = `
+568	  query ($id: Int) {
+569	    Media(id: $id, type: ANIME) {
+570	      ${MEDIA_CORE_FIELDS}
+571	    }
+572	  }
+573	`
+574	
+575	const SEARCH_MEDIA_SELECTION = `
+576	    Page(page: $page, perPage: $perPage) {
+577	      pageInfo { total currentPage lastPage hasNextPage perPage }
+578	      media(ARGS_PLACEHOLDER) {
+579	        ${MEDIA_CORE_FIELDS}
+580	      }
+581	    }
+582	`
+583	
+584	const PROBE_MEDIA_SELECTION = SEARCH_MEDIA_SELECTION.replace(MEDIA_CORE_FIELDS, 'id')
+585	
+586	interface SearchFilters {
+587	  search?: string | null
+588	  sort?: string[] | null
+589	  status?: string | null
+590	  format?: string[] | null
+591	  genre?: string[] | null
+592	  tags?: string[] | null
+593	  season?: string | null
+594	  seasonYear?: number | null
+595	  minScore?: number | null
+596	  isAdult?: boolean | null
+597	}
+598	
+599	function buildSearchQuery(f: SearchFilters, selection = SEARCH_MEDIA_SELECTION): string {
+600	  const decls: string[] = ['$page: Int', '$perPage: Int']
+601	  const args: string[] = ['type: ANIME']
+602	  if (f.search != null && f.search !== '') {
+603	    decls.push('$search: String')
+604	    args.push('search: $search')
+605	  }
+606	  if (f.sort != null) {
+607	    decls.push('$sort: [MediaSort]')
+608	    args.push('sort: $sort')
+609	  }
+610	  if (f.status != null) {
+611	    decls.push('$status: MediaStatus')
+612	    args.push('status: $status')
+613	  }
+614	  if (f.format != null && f.format.length > 0) {
+615	    decls.push('$format_in: [MediaFormat]')
+616	    args.push('format_in: $format_in')
+617	  }
+618	  if (f.genre != null && f.genre.length > 0) {
+619	    decls.push('$genre_in: [String]')
+620	    args.push('genre_in: $genre_in')
+621	  }
+622	  if (f.tags != null && f.tags.length > 0) {
+623	    decls.push('$tag_in: [String]')
+624	    args.push('tag_in: $tag_in')
+625	  }
+626	  if (f.season != null) {
+627	    decls.push('$season: MediaSeason')
+628	    args.push('season: $season')
+629	  }
+630	  if (f.seasonYear != null) {
+631	    decls.push('$seasonYear: Int')
+632	    args.push('seasonYear: $seasonYear')
+633	  }
+634	  if (f.minScore != null) {
+635	    decls.push('$minScore: Int')
+636	    args.push('averageScore_greater: $minScore')
+637	  }
+638	  if (f.isAdult != null) {
+639	    decls.push('$isAdult: Boolean')
+640	    args.push('isAdult: $isAdult')
+641	  }
+642	  const body = selection.replace('ARGS_PLACEHOLDER', args.join(', '))
+643	  return `query (${decls.join(', ')}) {\n${body}\n}`
+644	}
+645	
+646	function searchVariables(f: SearchFilters, page: number, perPage: number): Record<string, unknown> {
+647	  const variables: Record<string, unknown> = { page, perPage }
+648	  if (f.search != null && f.search !== '') variables.search = f.search
+649	  if (f.sort != null) variables.sort = f.sort
+650	  if (f.status != null) variables.status = f.status
+651	  if (f.format != null && f.format.length > 0) variables.format_in = f.format
+652	  if (f.genre != null && f.genre.length > 0) variables.genre_in = f.genre
+653	  if (f.tags != null && f.tags.length > 0) variables.tag_in = f.tags
+654	  if (f.season != null) variables.season = f.season
+655	  if (f.seasonYear != null) variables.seasonYear = f.seasonYear
+656	  if (f.minScore != null) variables.minScore = f.minScore
+657	  if (f.isAdult != null) variables.isAdult = f.isAdult
+658	  return variables
+659	}
+660	
+661	const MAX_SEARCH_PAGES = 208
+662	const MAX_PAGE_PROBES = 12
+663	
+664	interface ProbePage {
+665	  pageInfo: PageInfo
+666	  count: number
+667	}
+668	
+669	async function probeSearchPage(
+670	  f: SearchFilters,
+671	  page: number,
+672	  perPage: number,
+673	  signal?: AbortSignal,
+674	): Promise<ProbePage | null> {
+675	  interface Resp {
+676	    Page: { pageInfo: PageInfo; media: { id: number }[] }
+677	  }
+678	  try {
+679	    const r = await gql<Resp>(buildSearchQuery(f, PROBE_MEDIA_SELECTION), {
+680	      variables: searchVariables(f, page, perPage),
+681	      ttl: 60_000,
+682	      signal,
+683	    })
+684	    return { pageInfo: r.Page.pageInfo, count: (r.Page.media ?? []).length }
+685	  } catch {
+686	    return null
+687	  }
+688	}
+689	
+690	async function resolveTruePageInfo(
+691	  f: SearchFilters,
+692	  page: number,
+693	  perPage: number,
+694	  media: unknown[],
+695	  raw: PageInfo,
+696	  signal?: AbortSignal,
+697	): Promise<PageInfo> {
+698	  const withCurrent = (info: PageInfo): PageInfo => ({ ...info, currentPage: page, perPage })
+699	
+700	  if (media.length > 0 && !raw.hasNextPage) return raw
+701	  if (page === 1 && media.length === 0) return raw
+702	
+703	  let probes = 0
+704	  const probe = async (p: number): Promise<ProbePage | null> => {
+705	    if (probes >= MAX_PAGE_PROBES || p < 1 || p > MAX_SEARCH_PAGES) return null
+706	    probes += 1
+707	    return probeSearchPage(f, p, perPage, signal)
+708	  }
+709	
+710	  let lo: number
+711	  let hi: number
+712	
+713	  if (media.length > 0) {
+714	    lo = page
+715	    let emptyAt: number | null = null
+716	    for (let k = page * 2; k <= MAX_SEARCH_PAGES; k *= 2) {
+717	      const pr = await probe(k)
+718	      if (!pr) return raw
+719	      if (pr.count === 0) {
+720	        emptyAt = k
+721	        break
+722	      }
+723	      if (!pr.pageInfo.hasNextPage) return withCurrent(pr.pageInfo)
+724	      lo = k
+725	    }
+726	    if (emptyAt === null) {
+727	      const edge = await probe(MAX_SEARCH_PAGES)
+728	      if (edge && edge.count > 0 && !edge.pageInfo.hasNextPage) return withCurrent(edge.pageInfo)
+729	      return raw
+730	    }
+731	    hi = emptyAt
+732	  } else {
+733	    hi = page
+734	    const first = await probe(1)
+735	    if (!first) return raw
+736	    if (first.count === 0) {
+737	      return withCurrent({ total: 0, currentPage: page, lastPage: 1, hasNextPage: false, perPage })
+738	    }
+739	    if (!first.pageInfo.hasNextPage) return withCurrent(first.pageInfo)
+740	    lo = 1
+741	  }
+742	
+743	  while (hi - lo > 1) {
+744	    const mid = (lo + hi) >> 1
+745	    const pr = await probe(mid)
+746	    if (!pr) return raw
+747	    if (pr.count === 0) {
+748	      hi = mid
+749	      continue
+750	    }
+751	    if (!pr.pageInfo.hasNextPage) return withCurrent(pr.pageInfo)
+752	    lo = mid
+753	  }
+754	
+755	  const finalPr = await probe(lo)
+756	  const finalCount = finalPr ? finalPr.count : perPage
+757	
+758	  return withCurrent({
+759	    total: (lo - 1) * perPage + finalCount,
+760	    currentPage: page,
+761	    lastPage: lo,
+762	    hasNextPage: lo > page,
+763	    perPage,
+764	  })
+765	}
+766	
+767	function runSearch(
+768	  filters: SearchFilters,
+769	  page: number,
+770	  perPage: number,
+771	  signal?: AbortSignal,
+772	  ttl?: number,
+773	  verifyPageInfo = false,
+774	): Promise<Paginated<AnimeSummary>> {
+775	  interface Resp {
+776	    Page: { pageInfo: PageInfo; media: AniListMedia[] }
+777	  }
+778	  const query = buildSearchQuery(filters)
+779	  const variables = searchVariables(filters, page, perPage)
+780	  return gql<Resp>(query, { variables, ttl, signal }).then(async (r) => {
+781	    const media = r.Page.media ?? []
+782	    const pageInfo = verifyPageInfo
+783	      ? await resolveTruePageInfo(filters, page, perPage, media, r.Page.pageInfo, signal)
+784	      : r.Page.pageInfo
+785	    return toPaginated(pageInfo, media)
+786	  })
+787	}
+788	
+789	const RELATIONS_QUERY = `
+790	  query ($id: Int) {
+791	    Media(id: $id, type: ANIME) {
+792	      relations {
+793	        edges {
+794	          relationType(version: 2)
+795	          node {
+796	            id
+797	            siteUrl
+798	            format
+799	            coverImage { extraLarge large medium }
+800	            title { romaji english native }
+801	          }
+802	        }
+803	      }
+804	    }
+805	  }
+806	`
+807	
+808	const RECOMMENDATIONS_QUERY = `
+809	  query ($id: Int) {
+810	    Media(id: $id, type: ANIME) {
+811	      recommendations(perPage: 12, sort: RATING_DESC) {
+812	        nodes { mediaRecommendation { ${MEDIA_CORE_FIELDS} } }
+813	      }
+814	    }
+815	  }
+816	`
+817	
+818	const EPISODES_QUERY = `
+819	  query ($id: Int) {
+820	    Media(id: $id, type: ANIME) {
+821	      episodes
+822	      status
+823	      nextAiringEpisode { episode airingAt }
+824	      airingSchedule(notYetAired: false, perPage: 50) {
+825	        nodes { episode airingAt }
+826	      }
+827	    }
+828	  }
+829	`
+830	
+831	const SCHEDULE_QUERY = `
+832	  query ($perPage: Int, $airingAtGreater: Int, $airingAtLesser: Int) {
+833	    Page(perPage: $perPage) {
+834	      airingSchedules(
+835	        airingAt_greater: $airingAtGreater
+836	        airingAt_lesser: $airingAtLesser
+837	        sort: TIME
+838	      ) {
+839	        airingAt
+840	        episode
+841	        media { ${MEDIA_CORE_FIELDS} }
+842	      }
+843	    }
+844	  }
+845	`
+846	
+847	const UPCOMING_QUERY = `
+848	  query ($perPage: Int) {
+849	    Page(page: 1, perPage: $perPage) {
+850	      media(status: NOT_YET_RELEASED, type: ANIME, sort: [TRENDING_DESC, POPULARITY_DESC]) {
+851	        id
+852	        title { romaji english native }
+853	        coverImage { large }
+854	        season
+855	        seasonYear
+856	      }
+857	    }
+858	  }
+859	`
+860	
+861	interface UpcomingNode {
+862	  id: number
+863	  title: AniListTitle
+864	  coverImage: { large?: string | null } | null
+865	  season?: string | null
+866	  seasonYear?: number | null
+867	}
+868	interface UpcomingResp {
+869	  Page: { media: UpcomingNode[] | null }
+870	}
+871	
+872	export interface UpcomingAnime {
+873	  id: number
+874	  /** Best available title (english â†’ romaji â†’ native). */
+875	  title: string
+876	  /** Large poster URL (may be null for unreleased titles). */
+877	  coverImage: string | null
+878	  /** e.g. "WINTER", or null when an exact season hasn't been set. */
+879	  season: string | null
+880	  seasonYear: number | null
+881	}
+882	
+883	const GENRES_QUERY = `query { GenreCollection }`
+884	
+885	const SUGGESTIONS_QUERY = `
+886	  query ($search: String) {
+887	    Page(page: 1, perPage: 20) {
+888	      media(search: $search, type: ANIME, sort: [POPULARITY_DESC, SEARCH_MATCH]) {
+889	        id
+890	        title { romaji english native }
+891	        coverImage { extraLarge large medium }
+892	        format
+893	        averageScore
+894	        popularity
+895	      }
+896	    }
+897	  }
+898	`
+899	
+900	export function currentSeason(): { season: string; year: number } {
+901	  const now = new Date()
+902	  const month = now.getMonth()
+903	  const year = now.getFullYear()
+904	  let season: string
+905	  if (month <= 1 || month === 11) season = 'WINTER'
+906	  else if (month <= 4) season = 'SPRING'
+907	  else if (month <= 7) season = 'SUMMER'
+908	  else season = 'FALL'
+909	  return { season, year }
+910	}
+911	
+912	export interface AnimeSuggestion {
+913	  id: number
+914	  title: string
+915	  coverImage: string
+916	  format: string | null
+917	  averageScore: number | null
+918	}
+919	
+920	export interface ListParams {
+921	  q?: string
+922	  page?: number
+923	  limit?: number
+924	  order_by?: string
+925	  sort?: 'asc' | 'desc'
+926	  type?: string
+927	  status?: string
+928	  rating?: string
+929	  genres?: string
+930	  genre?: string
+931	  tags?: string
+932	  min_score?: number
+933	  max_score?: number
+934	  start_date?: string
+935	  end_date?: string
+936	  sfw?: boolean
+937	  letter?: string
+938	  verify_pagination?: boolean
+939	  /** AniList season, e.g. 'WINTER' | 'SPRING' | 'SUMMER' | 'FALL'. */
+940	  season?: string
+941	  /** Calendar year (4-digit). Paired with `season` to narrow a specific season. */
+942	  season_year?: number
+943	}
+944	
+945	function mapSort(orderBy?: string, dir: 'asc' | 'desc' = 'desc'): string[] {
+946	  const desc = dir !== 'asc'
+947	  switch (orderBy) {
+948	    case 'title':
+949	      return desc ? ['TITLE_ROMAJI_DESC'] : ['TITLE_ROMAJI']
+950	    case 'start_date':
+951	      return desc ? ['START_DATE_DESC'] : ['START_DATE']
+952	    case 'episodes':
+953	      return desc ? ['EPISODES_DESC'] : ['EPISODES']
+954	    case 'favorites':
+955	      return desc ? ['FAVOURITES_DESC'] : ['FAVOURITES']
+956	    case 'popularity':
+957	      return desc ? ['POPULARITY_DESC'] : ['POPULARITY']
+958	    case 'score':
+959	    case 'rank':
+960	    default:
+961	      return desc ? ['SCORE_DESC'] : ['SCORE']
+962	  }
+963	}
+964	
+965	function mapStatusFilter(status?: string): string | null {
+966	  switch (status) {
+967	    case 'airing':
+968	      return 'RELEASING'
+969	    case 'complete':
+970	      return 'FINISHED'
+971	    case 'upcoming':
+972	      return 'NOT_YET_RELEASED'
+973	    case 'cancelled':
+974	      return 'CANCELLED'
+975	    default:
+976	      return null
+977	  }
+978	}
+979	
+980	function mapIsAdult(rating?: string, sfw?: boolean): boolean | null {
+981	  if (sfw) return false
+982	  if (!rating) return null
+983	  if (rating === 'r17' || rating === 'r' || rating === 'rx') return true
+984	  if (rating === 'g' || rating === 'pg' || rating === 'pg13') return false
+985	  return null
+986	}
+987	
+988	export const anilist = {
+989	  searchAnime(params: ListParams = {}, signal?: AbortSignal): Promise<Paginated<AnimeSummary>> {
+990	    const genreNames = new Set<string>()
+991	    for (const name of (params.genre ?? '').split(',').map((s) => s.trim())) {
+992	      if (name) genreNames.add(name)
+993	    }
+994	    for (const rawId of (params.genres ?? '').split(',').map((s) => s.trim())) {
+995	      if (!rawId) continue
+996	      const name = genreName(Number(rawId))
+997	      if (name) genreNames.add(name)
+998	    }
+999	    const genreIn = [...genreNames]
+1000	
+1001	    const tagIn = (params.tags ?? '')
+1002	      .split(',')
+1003	      .map((s) => s.trim())
+1004	      .filter(Boolean)
+1005	
+1006	    const isFreeTextSearch = Boolean(params.q?.trim())
+1007	    const filters: SearchFilters = {
+1008	      search: params.q?.trim() ? params.q.trim() : null,
+1009	      // Free-text queries lead with POPULARITY then SEARCH_MATCH so the most
+1010	      // relevant, popular hits surface first. Explicit user picks still win.
+1011	      sort: isFreeTextSearch
+1012	        ? ['POPULARITY_DESC', 'SEARCH_MATCH']
+1013	        : mapSort(params.order_by, params.sort ?? 'desc'),
+1014	      status: mapStatusFilter(params.status),
+1015	      format: params.type ? [params.type.toUpperCase()] : null,
+1016	      genre: genreIn.length > 0 ? genreIn : null,
+1017	      tags: tagIn.length > 0 ? tagIn : null,
+1018	      minScore: params.min_score ? Math.round(params.min_score * 10) : null,
+1019	      isAdult: mapIsAdult(params.rating, params.sfw) ?? false,
+1020	      season: params.season ? params.season.toUpperCase() : null,
+1021	      seasonYear: params.season_year ?? null,
+1022	    }
+1023	    return runSearch(filters, params.page ?? 1, params.limit ?? 24, signal, undefined, params.verify_pagination === true)
+1024	  },
+1025	
+1026	  searchSuggestions(search: string, signal?: AbortSignal): Promise<AnimeSuggestion[]> {
+1027	    interface Resp {
+1028	      Page: {
+1029	        media: {
+1030	          id: number
+1031	          title: AniListTitle
+1032	          coverImage: AniListCoverImage
+1033	          format: string | null
+1034	          averageScore: number | null
+1035	          popularity: number | null
+1036	        }[]
+1037	      } | null
+1038	    }
+1039	    const q = search.trim()
+1040	    return gql<Resp>(SUGGESTIONS_QUERY, { variables: { search: q }, ttl: 60_000, signal }).then((r) => {
+1041	      const mediaList = r.Page?.media ?? []
+1042	      const items = mediaList.map((m) => ({
+1043	        id: m.id,
+1044	        title: m.title.english || m.title.romaji || m.title.native || '',
+1045	        coverImage: m.coverImage.extraLarge || m.coverImage.large || m.coverImage.medium || '',
+1046	        format: m.format ?? null,
+1047	        averageScore: m.averageScore ?? null,
+1048	      }))
+1049	      if (!q) return items
+1050	      const qLower = q.toLowerCase()
+1051	      const isPrefix = (t: AniListTitle) =>
+1052	        Object.values(t)
+1053	          .filter(Boolean)
+1054	          .some((v) => v.toLowerCase().startsWith(qLower))
+1055	      return items.sort((a, b) => {
+1056	        const ma = mediaList.find((m) => m.id === a.id)
+1057	        const mb = mediaList.find((m) => m.id === b.id)
+1058	        const aPrefix = ma && isPrefix(ma.title) ? 0 : 1
+1059	        const bPrefix = mb && isPrefix(mb.title) ? 0 : 1
+1060	        if (aPrefix !== bPrefix) return aPrefix - bPrefix
+1061	        const popDiff = (mb?.popularity ?? 0) - (ma?.popularity ?? 0)
+1062	        if (popDiff !== 0) return popDiff
+1063	        return (mb?.averageScore ?? 0) - (ma?.averageScore ?? 0)
+1064	      })
+1065	    })
+1066	  },
+1067	
+1068	  getAnime(id: number, signal?: AbortSignal): Promise<{ data: AnimeDetail }> {
+1069	    interface Resp {
+1070	      Media: AniListMedia
+1071	    }
+1072	    return gql<Resp>(MEDIA_BY_ID_QUERY, { variables: { id }, signal }).then((r) => ({
+1073	      data: mapDetail(r.Media),
+1074	    }))
+1075	  },
+1076	
+1077	  getAnimeLite(id: number, signal?: AbortSignal): Promise<{ data: AnimeSummary }> {
+1078	    interface Resp {
+1079	      Media: AniListMedia
+1080	    }
+1081	    return gql<Resp>(MEDIA_BY_ID_QUERY, { variables: { id }, signal }).then((r) => ({
+1082	      data: mapSummary(r.Media),
+1083	    }))
+1084	  },
+1085	
+1086	  getEpisodes(id: number, page = 1, signal?: AbortSignal): Promise<Paginated<Episode>> {
+1087	    const perPage = 50
+1088	    interface Resp {
+1089	      Media: {
+1090	        episodes: number | null
+1091	        status: string | null
+1092	        nextAiringEpisode: { episode: number; airingAt: number } | null
+1093	        airingSchedule: { nodes: { episode: number; airingAt: number }[] } | null
+1094	      }
+1095	    }
+1096	    return gql<Resp>(EPISODES_QUERY, { variables: { id }, ttl: TTL.season, signal }).then((r) => {
+1097	      const dateMap = new Map<number, string>()
+1098	      let maxScheduled = 0
+1099	      for (const node of r.Media.airingSchedule?.nodes ?? []) {
+1100	        const iso = isoFromUnix(node.airingAt)
+1101	        if (iso) dateMap.set(node.episode, iso)
+1102	        if (node.episode > maxScheduled) maxScheduled = node.episode
+1103	      }
+1104	
+1105	      const nextEp = r.Media.nextAiringEpisode?.episode ?? null
+1106	      const declared = r.Media.episodes ?? null
+1107	      const airedCount =
+1108	        nextEp != null ? Math.max(0, nextEp - 1) : (declared ?? maxScheduled)
+1109	
+1110	      const total = Math.max(
+1111	        0,
+1112	        declared ?? airedCount,
+1113	        maxScheduled,
+1114	      )
+1115	
+1116	      const safePage = Math.max(1, page)
+1117	      const startIdx = (safePage - 1) * perPage
+1118	      const endIdx = Math.min(startIdx + perPage, total)
+1119	      const data: Episode[] = []
+1120	      for (let n = startIdx + 1; n <= endIdx; n++) {
+1121	        const upcoming = nextEp != null && n >= nextEp
+1122	        data.push({
+1123	          mal_id: n,
+1124	          title: null,
+1125	          title_japanese: null,
+1126	          title_romanji: null,
+1127	          aired: upcoming ? null : dateMap.get(n) ?? null,
+1128	          score: null,
+1129	          filler: false,
+1130	          recap: false,
+1131	          forum_url: null,
+1132	          url: null,
+1133	          upcoming,
+1134	        })
+1135	      }
+1136	      const lastPage = Math.max(1, Math.ceil(total / perPage))
+1137	      return {
+1138	        data,
+1139	        pagination: {
+1140	          last_visible_page: lastPage,
+1141	          has_next_page: safePage < lastPage,
+1142	          current_page: safePage,
+1143	          items: { count: data.length, total, per_page: perPage },
+1144	        },
+1145	      }
+1146	    })
+1147	  },
+1148	
+1149	  getRelations(id: number, signal?: AbortSignal): Promise<SimpleList<JikanRelation>> {
+1150	    interface Edge {
+1151	      relationType: string | null
+1152	      node: AniListRelationsNode
+1153	    }
+1154	    interface Resp {
+1155	      Media: { relations: { edges: Edge[] } | null }
+1156	    }
+1157	    return gql<Resp>(RELATIONS_QUERY, { variables: { id }, signal }).then((r) => ({
+1158	      data: mapRelationEdges(r.Media.relations?.edges ?? []),
+1159	    }))
+1160	  },
+1161	
+1162	  getTopAnime(
+1163	    filter: 'airing' | 'upcoming' | 'bypopularity' | 'favorite' = 'bypopularity',
+1164	    page = 1,
+1165	    signal?: AbortSignal,
+1166	  ): Promise<Paginated<AnimeSummary>> {
+1167	    let sort: string[]
+1168	    let status: string | null = null
+1169	    switch (filter) {
+1170	      case 'airing':
+1171	        status = 'RELEASING'
+1172	        sort = ['POPULARITY_DESC']
+1173	        break
+1174	      case 'upcoming':
+1175	        status = 'NOT_YET_RELEASED'
+1176	        sort = ['POPULARITY_DESC']
+1177	        break
+1178	      case 'favorite':
+1179	        sort = ['FAVOURITES_DESC']
+1180	        break
+1181	      case 'bypopularity':
+1182	      default:
+1183	        sort = ['POPULARITY_DESC']
+1184	        break
+1185	    }
+1186	    return runSearch({ sort, status }, page, 24, signal, TTL.season)
+1187	  },
+1188	
+1189	  getSeasonNow(page = 1, signal?: AbortSignal): Promise<Paginated<AnimeSummary>> {
+1190	    const { season, year } = currentSeason()
+1191	    return runSearch({ sort: ['POPULARITY_DESC'], season, seasonYear: year }, page, 24, signal, TTL.season)
+1192	  },
+1193	
+1194	  getSchedule(
+1195	    day?: string,
+1196	    signal?: AbortSignal,
+1197	    range?: { start: number; end: number },
+1198	  ): Promise<SimpleList<ScheduleEntry>> {
+1199	    interface Node {
+1200	      airingAt: number
+1201	      episode: number
+1202	      media: AniListMedia
+1203	    }
+1204	    interface Resp {
+1205	      Page: { airingSchedules: Node[] }
+1206	    }
+1207	    // Default to the rolling window: start of today â†’ end of 7 days from now.
+1208	    const start = range?.start
+1209	    const end = range?.end
+1210	    return gql<Resp>(SCHEDULE_QUERY, {
+1211	      variables: { perPage: 50, airingAtGreater: start, airingAtLesser: end },
+1212	      ttl: TTL.season,
+1213	      signal,
+1214	    }).then((r) => {
+1215	      let nodes = r.Page.airingSchedules ?? []
+1216	      if (day) {
+1217	        const target = day.charAt(0).toUpperCase() + day.slice(1).toLowerCase()
+1218	        nodes = nodes.filter((n) => WEEKDAYS[new Date(n.airingAt * 1000).getUTCDay()] === target)
+1219	      }
+1220	      const data: ScheduleEntry[] = nodes.map((n) => {
+1221	        const summary = mapSummary(n.media)
+1222	        const iso = isoFromUnix(n.airingAt)
+1223	        const d = new Date(n.airingAt * 1000)
+1224	        const weekday = WEEKDAYS[d.getUTCDay()]
+1225	        const time = d.toISOString().slice(11, 16)
+1226	        return {
+1227	          mal_id: n.media.id,
+1228	          title: summary.title,
+1229	          url: summary.url,
+1230	          images: { jpg: summary.images.jpg },
+1231	          synopsis: summary.synopsis,
+1232	          romaji: n.media.title?.romaji ?? null,
+1233	          english: n.media.title?.english ?? null,
+1234	          airingAt: n.airingAt,
+1235	          episodes: [
+1236	            {
+1237	              mal_id: n.episode,
+1238	              title: null,
+1239	              title_japanese: null,
+1240	              title_romanji: null,
+1241	              aired: iso,
+1242	              score: null,
+1243	              filler: false,
+1244	              recap: false,
+1245	              forum_url: null,
+1246	              url: null,
+1247	            },
+1248	          ],
+1249	          broadcast: { day: weekday, time, timezone: 'JST', string: `${weekday} at ${time} (JST)` },
+1250	        }
+1251	      })
+1252	      return { data }
+1253	    })
+1254	  },
+1255	
+1256	  /**
+1257	   * Get the most-anticipated unreleased anime (status NOT_YET_RELEASED), ranked
+1258	   * by trending then popularity. Used by the Schedule page's announcements rail.
+1259	   */
+1260	  getUpcoming(limit = 10, signal?: AbortSignal): Promise<SimpleList<UpcomingAnime>> {
+1261	    return gql<UpcomingResp>(UPCOMING_QUERY, {
+1262	      variables: { perPage: limit },
+1263	      ttl: TTL.season,
+1264	      signal,
+1265	    }).then((r) => ({
+1266	      data: (r.Page?.media ?? []).map((n) => ({
+1267	        id: n.id,
+1268	        title: n.title.english || n.title.romaji || n.title.native || '',
+1269	        coverImage: n.coverImage?.large ?? null,
+1270	        season: n.season ?? null,
+1271	        seasonYear: n.seasonYear ?? null,
+1272	      })),
+1273	    }))
+1274	  },
+1275	
+1276	  getGenres(signal?: AbortSignal): Promise<SimpleList<Genre>> {
+1277	    interface Resp {
+1278	      GenreCollection: string[]
+1279	    }
+1280	    return gql<Resp>(GENRES_QUERY, { ttl: TTL.genres, signal }).then((r) => ({
+1281	      data: (r.GenreCollection ?? []).map((name) => ({ mal_id: genreId(name), name })),
+1282	    }))
+1283	  },
+1284	
+1285	  getRecommendations(
+1286	    id: number,
+1287	    signal?: AbortSignal,
+1288	  ): Promise<SimpleList<{ entry: AnimeSummary }>> {
+1289	    interface Node {
+1290	      mediaRecommendation: AniListMedia | null
+1291	    }
+1292	    interface Resp {
+1293	      Media: { recommendations: { nodes: Node[] } | null }
+1294	    }
+1295	    return gql<Resp>(RECOMMENDATIONS_QUERY, { variables: { id }, signal }).then((r) => ({
+1296	      data: (r.Media.recommendations?.nodes ?? [])
+1297	        .filter((n) => n.mediaRecommendation)
+1298	        .map((n) => ({ entry: mapSummary(n.mediaRecommendation as AniListMedia) })),
+1299	    }))
+1300	  },
+1301	}
+1302	export interface AnimeMeta {
+1303	  id: number
+1304	  title: string
+1305	  coverImage: string | null
+1306	}
+1307	
+1308	/**
+1309	 * fetchAnimeMetadata â€” batch-resolve AniList ids into lightweight display
+1310	 * summaries (id + best title + large cover). Used by the profile list views to
+1311	 * replace the raw "Anime #<id>" placeholders with real titles and posters.
+1312	 *
+1313	 * Behaviour:
+1314	 *   - De-duplicates the input list and drops non-positive / non-integer ids.
+1315	 *   - Returns `[]` for an empty input.
+1316	 *   - Never throws: a failed/blocked request degrades to `null` so the caller
+1317	 *     can still fall back to its `#<id>` labels.
+1318	 */
+1319	export async function fetchAnimeMetadata(
+1320	  idList: number[],
+1321	  signal?: AbortSignal,
+1322	): Promise<AnimeMeta[] | null> {
+1323	  const ids = [...new Set(idList.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0))]
+1324	  if (ids.length === 0) return []
+1325	
+1326	  const query = `
+1327	    query ($ids: [Int!]!) {
+1328	      Page {
+1329	        media(id_in: $ids, type: ANIME) {
+1330	          id
+1331	          title { romaji english native }
+1332	          coverImage { large }
+1333	        }
+1334	      }
+1335	    }
+1336	  `
+1337	  interface Resp {
+1338	    Page: {
+1339	      media: { id: number; title: AniListTitle; coverImage: AniListCoverImage }[] | null
+1340	    } | null
+1341	  }
+1342	  try {
+1343	    const r = await gql<Resp>(query, { variables: { ids }, signal })
+1344	    const media = r.Page?.media ?? []
+1345	    return media.map((m) => ({
+1346	      id: m.id,
+1347	      title: m.title.english || m.title.romaji || m.title.native || '',
+1348	      coverImage: m.coverImage?.large ?? null,
+1349	    }))
+1350	  } catch {
+1351	    return null
+1352	  }
+1353	}

@@ -1,0 +1,1194 @@
+﻿1	import { useEffect, useRef, useState } from 'react'
+2	import { Link, useParams } from 'react-router-dom'
+3	import { useI18n } from '../context/LanguageContext'
+4	import { translateGenre } from '../i18n'
+5	import { useLibrary } from '../context/LibraryContext'
+6	import { useAuth } from '../context/AuthContext'
+7	import {
+8	  getFavorites,
+9	  toggleFavorite as dbToggleFavorite,
+10	  getRating,
+11	  submitRating,
+12	  addToWatchlist,
+13	  removeFromWatchlist,
+14	  getWatchlist,
+15	} from '../lib/database'
+16	import type { Favorite, WatchlistStatus } from '../lib/database'
+17	import { anilist } from '../lib/anilist'
+18	import { useAsync } from '../hooks/useAsync'
+19	import { coverImage, cx, formatCount, formatLabel, formatScore, formatSeason, airingStatus, isMovie } from '../lib/utils'
+20	import type { AnimeDetail, Episode } from '../lib/types'
+21	import { Skeleton } from '../components/ui/Feedback'
+22	import { ErrorState } from '../components/ui/States'
+23	import { AnimeCard } from '../components/anime/AnimeCard'
+24	import { TrailerModal } from '../components/anime/TrailerModal'
+25	import { AutoTranslateSynopsis } from '../components/anime/AutoTranslateSynopsis'
+26	import { CollapsibleText } from '../components/anime/CollapsibleText'
+27	import { RelationsSection } from '../components/anime/RelationsSection'
+28	import {
+29	  HeartIcon,
+30	  PlayIcon,
+31	  StarIcon,
+32	  SubtitlesIcon,
+33	  ClockIcon,
+34	  ChevronDown,
+35	  CheckIcon,
+36	  CalendarPlusIcon,
+37	  ListIcon,
+38	  LockIcon,
+39	  PauseCircleIcon,
+40	  XCircleIcon,
+41	  SendIcon,
+42	  LaurelLeftIcon,
+43	  LaurelRightIcon,
+44	} from '../components/icons'
+45	
+46	const MIN_BANNER_WIDTH = 1280
+47	
+48	type WatchStatus = 'watching' | 'plan' | 'completed' | 'onhold' | 'dropped'
+49	
+50	/**
+51	 * Map the UI's watch-status ids onto the `watchlist.status` column values and
+52	 * back. `completed` is an *earned* state reached by finishing a series, so it is
+53	 * stored as `COMPLETED` and re-derived below (see `isCompleted`).
+54	 */
+55	const UI_TO_DB: Record<WatchStatus, WatchlistStatus> = {
+56	  watching: 'CURRENTLY_WATCHING',
+57	  plan: 'PLAN_TO_WATCH',
+58	  completed: 'COMPLETED',
+59	  onhold: 'ON_HOLD',
+60	  dropped: 'DROPPED',
+61	}
+62	const DB_TO_UI: Record<WatchlistStatus, WatchStatus> = {
+63	  CURRENTLY_WATCHING: 'watching',
+64	  PLAN_TO_WATCH: 'plan',
+65	  COMPLETED: 'completed',
+66	  ON_HOLD: 'onhold',
+67	  DROPPED: 'dropped',
+68	}
+69	
+70	/**
+71	 * Crunchyroll Anime Award "wins", keyed by AniList media id.
+72	 *
+73	 * AniList's API does not return Crunchyroll award data, so this is a small
+74	 * hardcoded look-alike of the real winners (+ a few more for variety). In this
+75	 * app the route id and the `mal_id` field on an anime are actually the AniList
+76	 * media id (see lib/anilist.ts -> mapMedia, `mal_id: m.id`), so we key by that.
+77	 * Anything not listed here (e.g. Wistoria: Wand and Sword) is a non-winner and
+78	 * simply renders no badge.
+79	 */
+80	const ANIMELIST_AWARD_WINNERS = new Map<number, number>([
+81	  [120377, 3], // Cyberpunk: Edgerunners -- Anime of 2022, Best Original, Best Action
+82	  [101922, 3], // Demon Slayer: Kimetsu no Yaiba -- 2021 Best Action + 2022 fan vote
+83	  [154587, 2], // Frieren: Beyond Journey's End (Sousou no Frieren)
+84	  [113415, 2], // Jujutsu Kaisen
+85	  [16498, 2], // Attack on Titan (Shingeki no Kyojin)
+86	  [21, 2], // One Piece
+87	  [21087, 2], // One Punch Man
+88	  [21827, 1], // Violet Evergarden (2019 Best Original Score)
+89	  [21355, 1], // Re:Zero Kara Hajimeru Isekai Seikatsu
+90	  [101348, 1], // Vinland Saga (2020 Best Action)
+91	  [101921, 1], // Kaguya-sama: Love Is War
+92	  [1535, 1], // Death Note (2018 anime of the future)
+93	])
+94	
+95	/**
+96	 * Premium "Anime Awards" badge. Entirely gold/amber. Only rendered when the
+97	 * current anime is a known Crunchyroll Anime Award winner (see above).
+98	 */
+99	function AwardBadge({ wins }: { wins: number }) {
+100	  return (
+101	    <div className="flex items-center gap-6 text-[#e5b85a]" title="Crunchyroll Anime Award">
+102	      {/* [Left laurel] [centered 3-line wordmark] [right laurel] */}
+103	      <div className="flex items-center gap-4">
+104	        <LaurelLeftIcon className="h-16 w-auto shrink-0" />
+105	        <div className="flex flex-col items-center leading-none">
+106	          <span className="mb-1 text-[8px] font-bold uppercase tracking-[0.4em]">CRUNCHYROLL</span>
+107	          <span className="text-3xl font-bold uppercase leading-none">ANIME</span>
+108	          <span className="text-lg font-normal uppercase leading-tight tracking-[0.2em]">AWARDS</span>
+109	        </div>
+110	        <LaurelRightIcon className="h-16 w-auto shrink-0" />
+111	      </div>
+112	      {/* Win count */}
+113	      <span className="whitespace-nowrap text-2xl font-bold uppercase text-yellow-400/90">
+114	        {wins} {wins === 1 ? 'Win' : 'Wins'}
+115	      </span>
+116	    </div>
+117	  )
+118	}
+119	
+120	export default function AnimeDetailPage() {
+121	  const { id } = useParams<{ id: string }>()
+122	  const malId = Number(id)
+123	  const { t, lang } = useI18n()
+124	  const { history, continueWatching, toggleFavorite: toggleLocalFavorite } = useLibrary()
+125	  const { user, supabaseConfigured, openAuthModal } = useAuth()
+126	  const [bannerLowRes, setBannerLowRes] = useState(false)
+127	  const [watchStatus, setWatchStatus] = useState<WatchStatus | null>(null)
+128	  const [userRating, setUserRating] = useState(0)
+129	  const [reviewDraft, setReviewDraft] = useState('')
+130	  const [reviews, setReviews] = useState<string[]>([])
+131	  // The set of AniList ids the signed-in user has favorited (loaded from the
+132	  // database so it reflects the real account, not just this device's storage).
+133	  const [favSet, setFavSet] = useState<Set<number>>(() => new Set())
+134	  useEffect(() => setBannerLowRes(false), [malId])
+135	
+136	  // Reset per-anime ephemeral state when navigating between titles.
+137	  useEffect(() => {
+138	    setWatchStatus(null)
+139	    setUserRating(0)
+140	    setReviewDraft('')
+141	    setReviews([])
+142	  }, [malId])
+143	
+144	  // Load the user's favorites for this account on mount / on auth change.
+145	  useEffect(() => {
+146	    if (!supabaseConfigured || !user) {
+147	      setFavSet(new Set())
+148	      return
+149	    }
+150	    let cancelled = false
+151	    void (async () => {
+152	      const res = await getFavorites(user.id)
+153	      if (cancelled) return
+154	      setFavSet(new Set((res.data ?? []).map((f: Favorite) => f.anime_id)))
+155	    })()
+156	    return () => {
+157	      cancelled = true
+158	    }
+159	  }, [user, supabaseConfigured])
+160	
+161	  // Load the user's existing rating for this title, if any.
+162	  useEffect(() => {
+163	    if (!supabaseConfigured || !user || !malId) {
+164	      setUserRating(0)
+165	      return
+166	    }
+167	    let cancelled = false
+168	    void (async () => {
+169	      const res = await getRating(malId, user.id)
+170	      if (cancelled) return
+171	      setUserRating(res.data?.score ?? 0)
+172	    })()
+173	    return () => {
+174	      cancelled = true
+175	    }
+176	  }, [malId, user, supabaseConfigured])
+177	
+178	  // Load the user's persisted watchlist status for this title, if any, so the
+179	  // dropdown reflects what they last saved (not just this device's session).
+180	  // `completed` here is applied verbatim; the "earned by finishing" derivation
+181	  // (`isCompleted`) ors in the watched-to-end state separately downstream.
+182	  useEffect(() => {
+183	    if (!supabaseConfigured || !user || !malId) return
+184	    let cancelled = false
+185	    void (async () => {
+186	      const res = await getWatchlist(user.id)
+187	      if (cancelled) return
+188	      const entry = (res.data ?? []).find((e) => e.anime_id === malId)
+189	      if (!entry) return
+190	      setWatchStatus(DB_TO_UI[entry.status])
+191	    })()
+192	    return () => {
+193	      cancelled = true
+194	    }
+195	  }, [malId, user, supabaseConfigured])
+196	
+197	  /** Pick a watchlist status from the dropdown: prompts guests to log in, then
+198	   *  persists the choice to the user's cloud watchlist. */
+199	  const handleWatchSelect = (status: WatchStatus) => {
+200	    if (!user) {
+201	      // Guests can preview the option but must sign in to actually track it.
+202	      setWatchStatus(status)
+203	      openAuthModal()
+204	      return
+205	    }
+206	    setWatchStatus(status)
+207	    // "Completed" from the dropdown is a no-op for tracking: it's earned by
+208	    // watching every episode. Persist every other choice so it survives reloads.
+209	    if (status !== 'completed') void addToWatchlist(malId, UI_TO_DB[status])
+210	  }
+211	
+212	  /** Drop this title from the user's watchlist entirely (guests are prompted). */
+213	  const handleWatchRemove = () => {
+214	    if (!user) {
+215	      openAuthModal()
+216	      return
+217	    }
+218	    setWatchStatus(null)
+219	    void removeFromWatchlist(malId)
+220	  }
+221	
+222	  /** Handle a 1..10 click from the "Your Rating" control (0 = clear). */
+223	  const handleRatingClick = (value: number) => {
+224	    if (!user) {
+225	      openAuthModal()
+226	      return
+227	    }
+228	    if (value === 0) {
+229	      // Clearing a rating clears the local UI; the DB row is left for the next
+230	      // pick (submitRating upserts on top of it).
+231	      setUserRating(0)
+232	      return
+233	    }
+234	    // Optimistic: reflect the pick before the write resolves.
+235	    setUserRating(value)
+236	    void submitRating(malId, value)
+237	  }
+238	
+239	  /** Toggle the database favorite for this title (guests are prompted to log in). */
+240	  const handleFavoriteToggle = async () => {
+241	    if (!user) {
+242	      openAuthModal()
+243	      return
+244	    }
+245	    const currentlyFav = favSet.has(malId)
+246	    // Optimistic flip so the heart reacts instantly.
+247	    setFavSet((prev) => {
+248	      const next = new Set(prev)
+249	      if (currentlyFav) next.delete(malId)
+250	      else next.add(malId)
+251	      return next
+252	    })
+253	    const res = await dbToggleFavorite(malId)
+254	    if (res.error) {
+255	      // Roll back on failure.
+256	      setFavSet((prev) => {
+257	        const next = new Set(prev)
+258	        if (currentlyFav) next.add(malId)
+259	        else next.delete(malId)
+260	        return next
+261	      })
+262	    } else if (res.data) {
+263	      // Now favorited: also add to the local (device) library so nav badges +
+264	      // the new-episode notification engine stay in sync.
+265	      if (anime.data) toggleLocalFavorite(anime.data)
+266	    }
+267	  }
+268	
+269	  const anime = useAsync((s) => anilist.getAnime(malId, s).then((r) => r.data), [malId])
+270	
+271	  if (anime.loading) {
+272	    return (
+273	      <div className="container-page py-10">
+274	        <DetailSkeleton />
+275	      </div>
+276	    )
+277	  }
+278	
+279	  if (anime.error || !anime.data) {
+280	    return (
+281	      <div className="container-page py-10">
+282	        <ErrorState message={anime.error ?? ''} onRetry={anime.reload} />
+283	      </div>
+284	    )
+285	  }
+286	
+287	  const detail = anime.data
+288	  const fav = favSet.has(detail.mal_id)
+289	  const img = coverImage(detail)
+290	
+291	  // Completed is an *earned* state: it is only reached once the user has
+292	  // actually watched the final episode of the series. Derived reactively from
+293	  // the watch history / continue-watching data (WatchPage records the last
+294	  // viewed episode + total whenever an episode is opened).
+295	  const histEntry = history.find((h) => h.mal_id === detail.mal_id)
+296	  const contEntry = continueWatching.find((c) => c.animeId === detail.mal_id)
+297	  const totalEp = detail.episodes ?? contEntry?.totalEpisodes ?? null
+298	  const watchedEp = histEntry?.episode ?? contEntry?.episode ?? 0
+299	  const isCompleted =
+300	    totalEp != null && totalEp > 0 && watchedEp >= totalEp
+301	      ? true
+302	      : watchStatus === 'completed'
+303	
+304	  // Award badge is rendered only for known Crunchyroll Anime Award winners
+305	  // (see ANIMELIST_AWARD_WINNERS). Non-winners get nothing in that slot.
+306	  const awardWins = ANIMELIST_AWARD_WINNERS.get(detail.mal_id)
+307	
+308	  // The final discussion is gated behind BOTH completing the series and giving
+309	  // a rating. (This applies only to this anime page â€” the per-episode
+310	  // discussion on WatchPage is intentionally left open.)
+311	  const reviewsUnlocked = isCompleted && userRating > 0
+312	  const banner = detail.bannerImage || ''
+313	  const hasTrailer = Boolean(detail.trailer && (detail.trailer.embed_url || detail.trailer.youtube_id))
+314	  const airing = airingStatus(detail.status)
+315	  const bannerUsable = Boolean(banner) && !bannerLowRes
+316	  const heroSrc = bannerUsable ? banner : img || banner
+317	
+318	  return (
+319	    <div className="isolate -mt-20 sm:-mt-24">
+320	      {/* Full-bleed top hero banner â€” pulled up behind the header to fill the top void */}
+321	      <div className="relative -z-10 h-[380px] w-full overflow-hidden bg-night-950 md:h-[460px]">
+322	        {heroSrc && (
+323	          <>
+324	            <img
+325	              src={heroSrc}
+326	              alt=""
+327	              aria-hidden="true"
+328	              className="pointer-events-none absolute inset-0 h-full w-full scale-110 object-cover object-center blur-2xl opacity-30"
+329	            />
+330	            {bannerUsable ? (
+331	              <img
+332	                src={heroSrc}
+333	                alt=""
+334	                aria-hidden="true"
+335	                onLoad={(e) => {
+336	                  const w = e.currentTarget.naturalWidth
+337	                  if (w > 0 && w < MIN_BANNER_WIDTH) setBannerLowRes(true)
+338	                }}
+339	                className="pointer-events-none relative block h-full w-full object-cover object-center"
+340	              />
+341	            ) : (
+342	              <img
+343	                src={heroSrc}
+344	                alt=""
+345	                aria-hidden="true"
+346	                className="pointer-events-none relative mx-auto block h-full w-auto max-w-none object-contain"
+347	              />
+348	            )}
+349	          </>
+350	        )}
+351	        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-night-950/55 via-night-950/20 to-night-950" />
+352	      </div>
+353	
+354	      <div className="container-page relative z-10 -mt-32 pb-12">
+355	        <div className="grid gap-8 lg:grid-cols-[260px_1fr]">
+356	          <div className="space-y-4">
+357	            <div className="relative aspect-[2/3] overflow-hidden rounded-2xl border border-night-700 bg-night-850 shadow-card">
+358	              {img ? (
+359	                <img
+360	                  src={img}
+361	                  alt={detail.title}
+362	                  loading="lazy"
+363	                  decoding="async"
+364	                  className="h-full w-full object-cover"
+365	                />
+366	              ) : (
+367	                <div className="flex h-full w-full items-center justify-center text-slate-600">
+368	                  ?
+369	                </div>
+370	              )}
+371	            </div>
+372	            <Link to={`/watch/${detail.mal_id}/1`} className="btn-primary w-full py-3">
+373	              <PlayIcon className="h-5 w-5" />
+374	              {isMovie(detail.type) ? t('detail.watchMovie') : t('detail.watchNow')}
+375	            </Link>
+376	            {hasTrailer && (
+377	              <TrailerButton detail={detail} />
+378	            )}
+379	            <button
+380	              onClick={() => void handleFavoriteToggle()}
+381	              className={cx('btn-ghost w-full py-3', fav && 'border-white/50 text-white')}
+382	            >
+383	              <HeartIcon filled={fav} className="h-5 w-5" />
+384	              {fav ? t('detail.removeFavorite') : t('detail.addFavorite')}
+385	            </button>
+386	          </div>
+387	
+388	          <div>
+389	            <div className="flex flex-wrap items-center gap-3">
+390	              <h1 className="text-2xl font-semibold tracking-wide text-white sm:text-4xl">
+391	                {detail.title_english || detail.title}
+392	              </h1>
+393	              {formatLabel(detail.type, lang) && (
+394	                <span className="rounded-lg bg-white/15 px-2.5 py-1 text-xs font-bold text-white ring-1 ring-white/20">
+395	                  {formatLabel(detail.type, lang)}
+396	                </span>
+397	              )}
+398	            </div>
+399	            {detail.title_japanese && (
+400	              <p className="mt-1 text-sm text-slate-400" dir="ltr">
+401	                {detail.title_japanese}
+402	              </p>
+403	            )}
+404	
+405	            {airing !== 'unknown' && (
+406	              <div className="mt-2">
+407	                <span
+408	                  className={cx(
+409	                    'inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold',
+410	                    airing === 'airing' && 'bg-emerald-500/15 text-emerald-400',
+411	                    airing === 'finished' && 'bg-slate-500/15 text-slate-300',
+412	                    airing === 'upcoming' && 'bg-white/10 text-slate-300',
+413	                  )}
+414	                >
+415	                  {airing === 'airing' && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />}
+416	                  {airing === 'airing' && t('detail.airing')}
+417	                  {airing === 'finished' && t('detail.finished')}
+418	                  {airing === 'upcoming' && t('detail.upcoming')}
+419	                </span>
+420	              </div>
+421	            )}
+422	
+423	            <StatsRow detail={detail} />
+424	
+425	            <div className="mt-4 flex flex-wrap items-center gap-3">
+426	              <WatchlistDropdown
+427	                selected={watchStatus}
+428	                onSelect={handleWatchSelect}
+429	                onRemove={handleWatchRemove}
+430	                completedByCompletion={isCompleted}
+431	              />
+432	              <YourRating value={userRating} onChange={handleRatingClick} draft={reviewDraft} onDraftChange={setReviewDraft} />
+433	              {awardWins != null && <AwardBadge wins={awardWins} />}
+434	            </div>
+435	
+436	            <FinalDiscussion
+437	              unlocked={reviewsUnlocked}
+438	              isCompleted={isCompleted}
+439	              rating={userRating}
+440	              reviews={reviews}
+441	              draft={reviewDraft}
+442	              onDraftChange={setReviewDraft}
+443	              onPost={(text) => setReviews((prev) => [...prev, text])}
+444	            />
+445	
+446	            <section className="mt-6">
+447	              <h2 className="mb-2 text-lg font-bold text-white">{t('detail.synopsis')}</h2>
+448	              {detail.synopsis ? (
+449	                <AutoTranslateSynopsis description={detail.synopsis} lines={4} />
+450	              ) : (
+451	                <p className="text-sm text-slate-400">{t('detail.noSynopsis')}</p>
+452	              )}
+453	            </section>
+454	
+455	            {detail.background && (
+456	              <section className="mt-4">
+457	                <h2 className="mb-2 text-lg font-bold text-white">{t('detail.background')}</h2>
+458	                <CollapsibleText text={detail.background} lines={3} />
+459	              </section>
+460	            )}
+461	
+462	            <TagsRow detail={detail} />
+463	
+464	            {!isMovie(detail.type) && (
+465	              <EpisodesSection
+466	                animeId={detail.mal_id}
+467	                totalEpisodes={detail.episodes}
+468	                nextAiringEpisode={detail.nextAiringEpisode?.episode ?? null}
+469	                image={detail.bannerImage || img}
+470	              />
+471	            )}
+472	
+473	            <RelationsSection key={detail.mal_id} animeId={detail.mal_id} />
+474	          </div>
+475	        </div>
+476	
+477	        <Recommendations animeId={detail.mal_id} />
+478	      </div>
+479	    </div>
+480	  )
+481	}
+482	
+483	interface WatchlistDropdownProps {
+484	  selected: WatchStatus | null
+485	  onSelect: (s: WatchStatus) => void
+486	  /** Invoked to drop this title from the watchlist entirely. */
+487	  onRemove: () => void
+488	  /** True when the user has actually watched all episodes (auto-completion). */
+489	  completedByCompletion: boolean
+490	}
+491	
+492	/**
+493	 * Watchlist status dropdown (Watching / Plan to Watch / Completed / On Hold /
+494	 * Dropped). Each option carries a color-coded icon; "Completed" is a locked,
+495	 * earned state â€” it can only be reached by watching every episode, never by
+496	 * clicking it.
+497	 */
+498	function WatchlistDropdown({ selected, onSelect, onRemove, completedByCompletion }: WatchlistDropdownProps) {
+499	  const { t } = useI18n()
+500	  const [open, setOpen] = useState(false)
+501	  const ref = useRef<HTMLDivElement>(null)
+502	
+503	  const options = [
+504	    { id: 'watching', label: t('detail.statusWatching'), Icon: ListIcon, color: 'text-teal-400', locked: false },
+505	    { id: 'plan', label: t('detail.statusPlanToWatch'), Icon: CalendarPlusIcon, color: 'text-sky-400', locked: false },
+506	    { id: 'completed', label: t('detail.statusCompleted'), Icon: CheckIcon, color: 'text-emerald-400', locked: true },
+507	    { id: 'onhold', label: t('detail.statusOnHold'), Icon: PauseCircleIcon, color: 'text-amber-400', locked: false },
+508	    { id: 'dropped', label: t('detail.statusDropped'), Icon: XCircleIcon, color: 'text-red-400', locked: false },
+509	  ] as const
+510	
+511	  useEffect(() => {
+512	    if (!open) return
+513	    const onClick = (e: MouseEvent) => {
+514	      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+515	    }
+516	    document.addEventListener('mousedown', onClick)
+517	    return () => document.removeEventListener('mousedown', onClick)
+518	  }, [open])
+519	
+520	  const current = options.find((o) => o.id === selected)
+521	  const isCompletedSelected = current?.id === 'completed' && completedByCompletion
+522	
+523	  return (
+524	    <div ref={ref} className="relative shrink-0">
+525	      <button
+526	        type="button"
+527	        onClick={() => setOpen((o) => !o)}
+528	        className={cx(
+529	          'btn-ghost py-3',
+530	          current &&
+531	            (isCompletedSelected
+532	              ? 'border-emerald-500/60 text-emerald-300'
+533	              : 'border-teal-500/60 text-teal-300'),
+534	        )}
+535	      >
+536	        {current ? (
+537	          <current.Icon className={cx('h-5 w-5 shrink-0', current.color)} />
+538	        ) : (
+539	          <ListIcon className="h-5 w-5 shrink-0" />
+540	        )}
+541	        <span>
+542	          {current?.label ?? t('detail.addToWatchlist')}
+543	          {isCompletedSelected && <LockIcon className="ms-1 inline h-3.5 w-3.5 opacity-70" />}
+544	        </span>
+545	        <ChevronDown className={cx('h-4 w-4 shrink-0 transition', open && 'rotate-180')} />
+546	      </button>
+547	      {open && (
+548	        <div className="absolute start-0 top-full z-30 mt-2 w-max min-w-55 overflow-hidden rounded-xl border border-night-600/80 bg-night-850 py-1 shadow-card">
+549	          {options.map(({ id, label, Icon, color, locked }) => (
+550	            <button
+551	              key={id}
+552	              type="button"
+553	              onClick={() => {
+554	                if (locked) return
+555	                onSelect(id)
+556	                setOpen(false)
+557	              }}
+558	              aria-disabled={locked}
+559	              className={cx(
+560	                'flex w-full items-center gap-2.5 px-3 py-2 text-start text-sm transition',
+561	                locked
+562	                  ? 'cursor-not-allowed opacity-50'
+563	                  : 'hover:bg-night-800',
+564	                selected === id && !locked ? 'font-semibold text-teal-300' : 'text-slate-200',
+565	              )}
+566	            >
+567	              <Icon className={cx('h-4 w-4 shrink-0', color)} />
+568	              <span className="flex-1">{label}</span>
+569	              {locked && <LockIcon className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
+570	            </button>
+571	          ))}
+572	          {/* Only meaningful when the title is already tracked. */}
+573	          {selected != null && (
+574	            <>
+575	              <div className="my-1 h-px bg-night-700/70" />
+576	              <button
+577	                type="button"
+578	                onClick={() => {
+579	                  onRemove()
+580	                  setOpen(false)
+581	                }}
+582	                className="flex w-full items-center gap-2.5 px-3 py-2 text-start text-sm text-red-300 transition hover:bg-night-800"
+583	              >
+584	                <XCircleIcon className="h-4 w-4 shrink-0 text-red-400" />
+585	                <span className="flex-1">{t('detail.removeFromWatchlist')}</span>
+586	              </button>
+587	            </>
+588	          )}
+589	        </div>
+590	      )}
+591	    </div>
+592	  )
+593	}
+594	
+595	interface YourRatingProps {
+596	  value: number
+597	  onChange: (v: number) => void
+598	  draft: string
+599	  onDraftChange: (v: string) => void
+600	}
+601	
+602	/**
+603	 * Your Rating â€” selectable 1..10 scale. Once the user picks a rating, a comment
+604	 * field is revealed right below it so they can jot down their final thoughts.
+605	 */
+606	function YourRating({ value, onChange, draft, onDraftChange }: YourRatingProps) {
+607	  const { t } = useI18n()
+608	  const rated = value > 0
+609	  return (
+610	    <div className="min-w-0 flex-1">
+611	      <div className="inline-block max-w-full rounded-xl border border-night-600/80 bg-night-900/60 px-3 py-2">
+612	      <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+613	        {t('detail.yourRating')}
+614	      </span>
+615	      <div className="flex items-center gap-2">
+616	        {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+617	          const hot = value >= n
+618	          return (
+619	            <button
+620	              key={n}
+621	              type="button"
+622	              onClick={() => onChange(value === n ? 0 : n)}
+623	              title={`${n} / 10`}
+624	              className={cx(
+625	                'flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-xs font-bold transition',
+626	                hot ? 'bg-gold-500 text-night-950' : 'text-slate-400 hover:bg-night-700 hover:text-white',
+627	              )}
+628	            >
+629	              {n}
+630	            </button>
+631	          )
+632	        })}
+633	      </div>
+634	      {/* Revealed once a rating is chosen (final thoughts, pre-discussion). */}
+635	      {rated && (
+636	        <div className="mt-3 border-t border-night-700/70 pt-3">
+637	          <textarea
+638	            value={draft}
+639	            onChange={(e) => onDraftChange(e.target.value)}
+640	            rows={2}
+641	            placeholder={t('detail.writeFinalThoughts')}
+642	            aria-label={t('detail.finalDiscussion')}
+643	            className="w-full resize-none rounded-lg border border-night-600/80 bg-night-950/50 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-slate-400/60 focus:outline-none"
+644	          />
+645	        </div>
+646	      )}
+647	      </div>
+648	    </div>
+649	  )
+650	}
+651	
+652	interface FinalDiscussionProps {
+653	  unlocked: boolean
+654	  isCompleted: boolean
+655	  rating: number
+656	  reviews: string[]
+657	  draft: string
+658	  onDraftChange: (v: string) => void
+659	  onPost: (text: string) => void
+660	}
+661	
+662	/**
+663	 * Final Discussion â€” the main anime review box. Locked until the user has BOTH
+664	 * completed the series and selected a rating. Deliberately independent from the
+665	 * per-episode discussion on the Watch page (which stays open).
+666	 */
+667	function FinalDiscussion({
+668	  unlocked,
+669	  isCompleted,
+670	  rating,
+671	  reviews,
+672	  draft,
+673	  onDraftChange,
+674	  onPost,
+675	}: FinalDiscussionProps) {
+676	  const { t } = useI18n()
+677	  const publish = () => {
+678	    const text = draft.trim()
+679	    if (!text || !unlocked) return
+680	    onPost(text)
+681	    onDraftChange('')
+682	  }
+683	  return (
+684	    <section className="mt-5 rounded-xl border border-night-700/70 bg-night-850/50 p-4">
+685	      <div className="mb-3 flex items-center gap-2">
+686	        <StarIcon className={cx('h-4 w-4', unlocked ? 'text-gold-400' : 'text-slate-500')} />
+687	        <h2 className="text-sm font-bold text-white">{t('detail.finalDiscussion')}</h2>
+688	      </div>
+689	
+690	      {unlocked ? (
+691	        <>
+692	          <div className="flex items-center gap-2 text-xs text-slate-400">
+693	            <CheckIcon className="h-3.5 w-3.5 text-emerald-400" />
+694	            {t('detail.statusCompleted')}
+695	            <span className="text-slate-600">â€¢</span>
+696	            <StarIcon className="h-3.5 w-3.5 text-gold-400" />
+697	            {rating} / 10
+698	          </div>
+699	          <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+700	            <input
+701	              type="text"
+702	              value={draft}
+703	              onChange={(e) => onDraftChange(e.target.value)}
+704	              onKeyDown={(e) => {
+705	                if (e.key === 'Enter') publish()
+706	              }}
+707	              placeholder={t('detail.writeFinalThoughts')}
+708	              aria-label={t('detail.finalDiscussion')}
+709	              className="h-10 w-full min-w-0 rounded-full border border-night-600/80 bg-night-900/70 px-4 text-sm text-slate-100 placeholder:text-slate-500 focus:border-slate-400/60 focus:outline-none"
+710	            />
+711	            <button
+712	              type="button"
+713	              onClick={publish}
+714	              disabled={!draft.trim()}
+715	              className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full bg-teal-500 px-4 text-sm font-semibold text-night-950 transition hover:bg-teal-400 disabled:cursor-not-allowed disabled:opacity-40"
+716	            >
+717	              <SendIcon className="h-4 w-4" />
+718	              {t('detail.publish')}
+719	            </button>
+720	          </div>
+721	          {reviews.length === 0 ? (
+722	            <div className="mt-3 rounded-xl border border-night-700/60 bg-night-900/50 px-4 py-5 text-center text-sm text-slate-500">
+723	              {t('detail.noReviewsYet')}
+724	            </div>
+725	          ) : (
+726	            <div className="mt-3 space-y-2">
+727	              {reviews.map((c, i) => (
+728	                <div key={i} className="rounded-xl border border-night-700/60 bg-night-900/50 px-4 py-2.5 text-sm text-slate-200">
+729	                  {c}
+730	                </div>
+731	              ))}
+732	            </div>
+733	          )}
+734	        </>
+735	      ) : (
+736	        <div className="flex items-start gap-3 rounded-xl border border-dashed border-night-600/80 bg-night-900/40 px-4 py-5 text-sm text-slate-400">
+737	          <LockIcon className="mt-0.5 h-5 w-5 shrink-0 text-slate-500" />
+738	          <div>
+739	            <p>{t('detail.reviewLocked')}</p>
+740	            <div className="mt-3 flex flex-wrap gap-2">
+741	              <span
+742	                className={cx(
+743	                  'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
+744	                  isCompleted ? 'bg-emerald-500/15 text-emerald-400' : 'bg-night-800 text-slate-500',
+745	                )}
+746	              >
+747	                {isCompleted ? <CheckIcon className="h-3.5 w-3.5" /> : <LockIcon className="h-3.5 w-3.5" />}
+748	                {t('detail.statusCompleted')}
+749	              </span>
+750	              <span
+751	                className={cx(
+752	                  'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs',
+753	                  rating > 0 ? 'bg-gold-500/15 text-gold-400' : 'bg-night-800 text-slate-500',
+754	                )}
+755	              >
+756	                {rating > 0 ? <StarIcon className="h-3.5 w-3.5" /> : <LockIcon className="h-3.5 w-3.5" />}
+757	                {t('detail.yourRating')}
+758	              </span>
+759	            </div>
+760	          </div>
+761	        </div>
+762	      )}
+763	    </section>
+764	  )
+765	}
+766	
+767	function TrailerButton({ detail }: { detail: AnimeDetail }) {
+768	  const { t } = useI18n()
+769	  const [open, setOpen] = useState(false)
+770	  return (
+771	    <>
+772	      <button
+773	        type="button"
+774	        onClick={() => setOpen(true)}
+775	        className="btn-ghost w-full py-3 border-white/30 text-slate-200 hover:border-slate-400/60"
+776	      >
+777	        <PlayIcon className="h-5 w-5" />
+778	        {t('detail.playTrailer')}
+779	      </button>
+780	      <TrailerModal open={open} onClose={() => setOpen(false)} trailer={detail.trailer} />
+781	    </>
+782	  )
+783	}
+784	
+785	function Stat({ label, value }: { label: string; value: string }) {
+786	  return (
+787	    <div className="rounded-xl border border-night-700/70 bg-night-850/60 px-3 py-2">
+788	      <div className="text-[11px] uppercase tracking-wide text-slate-500">{label}</div>
+789	      <div className="mt-0.5 text-sm font-bold text-white">{value}</div>
+790	    </div>
+791	  )
+792	}
+793	
+794	function StatsRow({ detail }: { detail: AnimeDetail }) {
+795	  const { t } = useI18n()
+796	  const [scoresOpen, setScoresOpen] = useState(false)
+797	  const scoreRef = useRef<HTMLDivElement>(null)
+798	
+799	  // Close the external-ratings dropdown on tap/click outside (mobile).
+800	  useEffect(() => {
+801	    if (!scoresOpen) return
+802	    const onClick = (e: Event) => {
+803	      if (scoreRef.current && !scoreRef.current.contains(e.target as Node)) setScoresOpen(false)
+804	    }
+805	    document.addEventListener('mousedown', onClick)
+806	    document.addEventListener('touchstart', onClick)
+807	    return () => {
+808	      document.removeEventListener('mousedown', onClick)
+809	      document.removeEventListener('touchstart', onClick)
+810	    }
+811	  }, [scoresOpen])
+812	
+813	  return (
+814	    <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+815	      {/* Score metric â€” interactive trigger: hover (desktop) or tap (mobile)
+816	          reveals the external ratings dropdown below. */}
+817	      <div
+818	        ref={scoreRef}
+819	        className="relative group cursor-pointer"
+820	        onClick={() => setScoresOpen((o) => !o)}
+821	      >
+822	        <div className="rounded-xl border border-gold-500/30 bg-gold-500/10 px-3 py-2 transition hover:border-gold-400/60 hover:bg-gold-500/15">
+823	          <div className="text-[11px] uppercase tracking-wide text-gold-400">{t('detail.score')}</div>
+824	          <div className="mt-0.5 flex items-center gap-1 text-sm font-bold text-gold-400">
+825	            <StarIcon filled className="h-3.5 w-3.5" />
+826	            {formatScore(detail.score)}
+827	            {detail.scored_by != null && (
+828	              <span className="text-[10px] font-normal text-slate-500">
+829	                ({formatCount(detail.scored_by)})
+830	              </span>
+831	            )}
+832	            <ChevronDown className="ms-auto h-3.5 w-3.5 shrink-0 text-gold-400/70 transition-transform group-hover:rotate-180" />
+833	          </div>
+834	        </div>
+835	
+836	        {/* External ratings dropdown (IMDb / Crunchyroll Anime Awards / MyAnimeList) */}
+837	        <div
+838	          className={cx(
+839	            'absolute top-full left-0 mt-2 w-48 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50',
+840	            scoresOpen && 'opacity-100 visible',
+841	          )}
+842	        >
+843	          <div className="overflow-hidden rounded-xl border border-gold-500/20 bg-night-950/95 p-2 shadow-card ring-1 ring-gold-500/10 backdrop-blur-sm">
+844	            <p className="px-2 pt-1 pb-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+845	              {t('detail.externalRatings')}
+846	            </p>
+847	            <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-white/5">
+848	              <span
+849	                className="flex h-6 min-w-10 shrink-0 items-center justify-center rounded-md bg-[#f5c518] px-1 text-[10px] font-bold tracking-tight text-night-950"
+850	                dir="ltr"
+851	              >
+852	                IMDb
+853	              </span>
+854	              <span className="ms-auto text-sm font-bold text-gold-400" dir="ltr">
+855	                8.8 / 10
+856	              </span>
+857	            </div>
+858	            <div className="mb-1 flex items-center gap-2 rounded-lg px-2 py-1.5 transition-colors hover:bg-white/5">
+859	              <span
+860	                className="flex h-6 min-w-9 shrink-0 items-center justify-center rounded-md bg-[#2e589e] px-1 text-[10px] font-bold tracking-tight text-white"
+861	                dir="ltr"
+862	              >
+863	                MAL
+864	              </span>
+865	              <span className="ms-auto text-sm font-bold text-sky-400" dir="ltr">
+866	                8.65 / 10
+867	              </span>
+868	            </div>
+869	          </div>
+870	        </div>
+871	      </div>
+872	      {detail.format !== 'MOVIE' && (
+873	        <Stat label={t('detail.episodes')} value={detail.episodes != null ? String(detail.episodes) : '?'} />
+874	      )}
+875	      <Stat label={t('detail.status')} value={detail.status ?? 'â€”'} />
+876	      <Stat label={t('detail.aired')} value={detail.aired?.string ?? 'â€”'} />
+877	      <Stat label={t('detail.season')} value={formatSeason(detail.season, detail.year)} />
+878	      <Stat label={t('detail.studios')} value={detail.studios?.map((s) => s.name).join(', ') || 'â€”'} />
+879	    </div>
+880	  )
+881	}
+882	
+883	function TagList({ title, items }: { title: string; items?: { mal_id: number; name: string }[] }) {
+884	  const { lang } = useI18n()
+885	  if (!items || items.length === 0) return null
+886	  return (
+887	    <div className="mt-4">
+888	      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
+889	      <div className="flex flex-wrap gap-2">
+890	        {items.map((g) => (
+891	          <Link
+892	            key={g.mal_id}
+893	            to={`/catalog?genre=${encodeURIComponent(g.name)}`}
+894	            className="chip hover:border-slate-400/60 hover:text-white"
+895	          >
+896	            {translateGenre(g.name, lang)}
+897	          </Link>
+898	        ))}
+899	      </div>
+900	    </div>
+901	  )
+902	}
+903	
+904	function TagsRow({ detail }: { detail: AnimeDetail }) {
+905	  const { t } = useI18n()
+906	  return (
+907	    <div>
+908	      <TagList title={t('detail.genres')} items={detail.genres} />
+909	      <TagList title={t('detail.themes')} items={detail.themes} />
+910	    </div>
+911	  )
+912	}
+913	
+914	const EPISODES_PER_BATCH = 50
+915	
+916	function EpisodesSection({
+917	  animeId,
+918	  totalEpisodes,
+919	  nextAiringEpisode,
+920	  image,
+921	}: {
+922	  animeId: number
+923	  totalEpisodes: number | null
+924	  nextAiringEpisode: number | null
+925	  image: string
+926	}) {
+927	  const { t } = useI18n()
+928	  const [page, setPage] = useState(1)
+929	  const episodes = useAsync((s) => anilist.getEpisodes(animeId, page, s).then((r) => r), [animeId, page])
+930	
+931	  const total =
+932	    episodes.data?.pagination.items.total ??
+933	    totalEpisodes ??
+934	    (nextAiringEpisode != null ? Math.max(0, nextAiringEpisode - 1) : null)
+935	  const lastPage = episodes.data?.pagination.last_visible_page ?? 1
+936	  const currentCount = episodes.data?.pagination.items.count ?? 0
+937	  const rangeFrom = (page - 1) * EPISODES_PER_BATCH + 1
+938	  const rangeTo = (page - 1) * EPISODES_PER_BATCH + currentCount
+939	
+940	  const batches: { page: number; label: string }[] = []
+941	  const source = total ?? 0
+942	  for (let p = 1; p <= Math.max(1, lastPage); p++) {
+943	    const from = (p - 1) * EPISODES_PER_BATCH + 1
+944	    const to = Math.min(p * EPISODES_PER_BATCH, source)
+945	    batches.push({ page: p, label: `${from}â€“${to}` })
+946	  }
+947	
+948	  return (
+949	    <section className="mt-8">
+950	      <div className="mb-3 flex flex-wrap items-center gap-2">
+951	        <SubtitlesIcon className="h-5 w-5 text-slate-300" />
+952	        <h2 className="text-lg font-bold text-white">{t('detail.episodeList')}</h2>
+953	        {total != null && <span className="text-sm text-slate-500">({total})</span>}
+954	      </div>
+955	
+956	      {total != null && total > EPISODES_PER_BATCH && (
+957	        <>
+958	          <p className="mb-2 text-xs text-slate-500">{t('detail.episodeListHint')}</p>
+959	          <div className="thin-scrollbar mb-4 flex gap-2 overflow-x-auto pb-1">
+960	            {batches.map((b) => (
+961	              <button
+962	                key={b.page}
+963	                type="button"
+964	                onClick={() => setPage(b.page)}
+965	                aria-current={b.page === page ? 'true' : undefined}
+966	                className={
+967	                  b.page === page
+968	                    ? 'shrink-0 rounded-full border border-white/40 bg-white/10 px-3 py-1 text-xs font-semibold text-white'
+969	                    : 'shrink-0 rounded-full border border-night-600/80 bg-night-800/60 px-3 py-1 text-xs font-semibold text-slate-300 transition hover:border-slate-400/60 hover:text-white'
+970	                }
+971	              >
+972	                {b.label}
+973	              </button>
+974	            ))}
+975	          </div>
+976	        </>
+977	      )}
+978	
+979	      {episodes.loading && (
+980	        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+981	          {Array.from({ length: 6 }).map((_, i) => (
+982	            <Skeleton key={i} className="h-40" />
+983	          ))}
+984	        </div>
+985	      )}
+986	      {episodes.error && <ErrorState message={episodes.error} onRetry={episodes.reload} compact />}
+987	      {episodes.data && episodes.data.data.length === 0 && (
+988	        <p className="rounded-xl border border-night-700/70 bg-night-850/60 p-4 text-sm text-slate-400">
+989	          {t('detail.noEpisodes')}
+990	        </p>
+991	      )}
+992	
+993	      {episodes.data && episodes.data.data.length > 0 && (
+994	        <>
+995	          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+996	            {episodes.data.data.map((ep) => (
+997	              <EpisodeRow key={ep.mal_id} animeId={animeId} episode={ep} image={image} />
+998	            ))}
+999	          </div>
+1000	          {batches.length > 1 && (
+1001	            <div className="mt-4 flex items-center justify-between text-sm">
+1002	              <button
+1003	                type="button"
+1004	                onClick={() => setPage((p) => Math.max(1, p - 1))}
+1005	                disabled={page <= 1}
+1006	                className="btn-ghost disabled:opacity-40"
+1007	              >
+1008	                {t('catalog.prev')}
+1009	              </button>
+1010	              <span className="text-slate-500">
+1011	                {t('detail.episodeRange', { from: rangeFrom, to: rangeTo })}
+1012	              </span>
+1013	              <button
+1014	                type="button"
+1015	                onClick={() => setPage((p) => Math.min(batches.length, p + 1))}
+1016	                disabled={page >= batches.length}
+1017	                className="btn-ghost disabled:opacity-40"
+1018	              >
+1019	                {t('catalog.next')}
+1020	              </button>
+1021	            </div>
+1022	          )}
+1023	        </>
+1024	      )}
+1025	    </section>
+1026	  )
+1027	}
+1028	
+1029	/**
+1030	 * Episode thumbnail: shows the anime's main artwork (banner image, falling
+1031	 * back to the cover image) as the background for every episode in the grid.
+1032	 */
+1033	function EpisodeThumb({ episode, image }: { episode: Episode; image: string }) {
+1034	  if (episode.upcoming === true) {
+1035	    return (
+1036	      <div className="relative aspect-video w-28 shrink-0 overflow-hidden rounded-lg bg-night-800/80">
+1037	        {image && (
+1038	          <img
+1039	            src={image}
+1040	            alt=""
+1041	            aria-hidden="true"
+1042	            className="absolute inset-0 h-full w-full object-cover"
+1043	          />
+1044	        )}
+1045	        <span className="absolute inset-0 bg-black/60" />
+1046	        <span className="absolute inset-0 flex items-center justify-center">
+1047	          <ClockIcon className="h-7 w-7 text-slate-200" />
+1048	        </span>
+1049	      </div>
+1050	    )
+1051	  }
+1052	
+1053	  return (
+1054	    <div className="relative aspect-video w-28 shrink-0 overflow-hidden rounded-lg bg-night-800/80">
+1055	      {image && (
+1056	        <img
+1057	          src={image}
+1058	          alt=""
+1059	          aria-hidden="true"
+1060	          className="absolute inset-0 h-full w-full object-cover"
+1061	        />
+1062	      )}
+1063	      <span className="absolute inset-0 flex items-center justify-center rounded-lg bg-night-900/50 opacity-0 transition group-hover:opacity-100">
+1064	        <PlayIcon className="h-7 w-7 text-white" />
+1065	      </span>
+1066	      <span className="absolute bottom-1.5 start-1.5 rounded bg-black/40 px-1.5 py-0.5 text-[10px] font-bold text-white/90">
+1067	        {episode.mal_id}
+1068	      </span>
+1069	    </div>
+1070	  )
+1071	}
+1072	
+1073	function EpisodeRow({ animeId, episode, image }: { animeId: number; episode: Episode; image: string }) {
+1074	  const { t } = useI18n()
+1075	  const title = episode.title || episode.title_romanji || episode.title_japanese
+1076	  const romanji = episode.title_romanji && episode.title_romanji !== title ? episode.title_romanji : null
+1077	  // Duration is not part of the current Episode contract; render the header
+1078	  // number plus a placeholder-free label now and the duration (e.g. "23:40")
+1079	  // automatically appears the moment an API source starts providing `duration`.
+1080	  const duration = (episode as Episode & { duration?: number | string }).duration
+1081	  const durationLabel =
+1082	    typeof duration === 'number' && duration > 0
+1083	      ? `${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, '0')}`
+1084	      : typeof duration === 'string' && duration.length > 0
+1085	        ? duration
+1086	        : null
+1087	
+1088	  const upcoming = episode.upcoming === true
+1089	  const header = [t('detail.episode') + ' ' + episode.mal_id, durationLabel].filter(Boolean).join(' Â· ')
+1090	
+1091	  if (upcoming) {
+1092	    return (
+1093	      <div
+1094	        aria-disabled="true"
+1095	        className="pointer-events-none flex items-start gap-3 rounded-xl border border-night-700/50 bg-night-850/40 p-3 opacity-50"
+1096	      >
+1097	        <EpisodeThumb episode={episode} image={image} />
+1098	
+1099	        {/* Metadata column */}
+1100	        <div className="flex min-w-0 flex-1 flex-col">
+1101	          <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{header}</p>
+1102	          <p className="mt-1 line-clamp-2 text-sm font-semibold text-slate-400">
+1103	            {title ?? `${t('detail.episode')} ${episode.mal_id}`}
+1104	          </p>
+1105	          {romanji && (
+1106	            <p className="mt-0.5 truncate text-xs text-slate-500" dir="ltr">
+1107	              {romanji}
+1108	            </p>
+1109	          )}
+1110	          <span className="mt-auto flex items-center gap-1.5 pt-2 text-[11px] font-semibold text-cyan-400">
+1111	            <ClockIcon className="h-3.5 w-3.5" />
+1112	            {t('detail.comingSoon')}
+1113	          </span>
+1114	        </div>
+1115	      </div>
+1116	    )
+1117	  }
+1118	
+1119	  return (
+1120	    <Link
+1121	      to={`/watch/${animeId}/${episode.mal_id}`}
+1122	      className="group flex items-start gap-3 rounded-xl border border-night-700/70 bg-night-850/50 p-3 transition hover:border-slate-400/60 hover:bg-night-800/70"
+1123	    >
+1124	      <EpisodeThumb episode={episode} image={image} />
+1125	
+1126	      {/* Metadata column */}
+1127	      <div className="flex min-w-0 flex-1 flex-col">
+1128	        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{header}</p>
+1129	        <p className="mt-1 line-clamp-2 text-sm font-semibold text-slate-100">
+1130	          {title ?? `${t('detail.episode')} ${episode.mal_id}`}
+1131	        </p>
+1132	        {romanji && (
+1133	          <p className="mt-0.5 truncate text-xs text-slate-500" dir="ltr">
+1134	            {romanji}
+1135	          </p>
+1136	        )}
+1137	        <span className="mt-auto flex items-center gap-1.5 pt-2 text-[11px] font-medium text-slate-400">
+1138	          <span className="inline-block h-2.5 w-2.5 rounded-full border border-slate-500" />
+1139	          {t('detail.notWatched')}
+1140	        </span>
+1141	      </div>
+1142	    </Link>
+1143	  )
+1144	}
+1145	
+1146	function Recommendations({ animeId }: { animeId: number }) {
+1147	  const { t } = useI18n()
+1148	  const recs = useAsync((s) => anilist.getRecommendations(animeId, s).then((r) => r.data), [animeId])
+1149	
+1150	  if (recs.loading) {
+1151	    return (
+1152	      <section className="mt-12">
+1153	        <h2 className="mb-4 text-xl font-semibold tracking-wide text-white">{t('detail.recommendations')}</h2>
+1154	        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+1155	          {Array.from({ length: 6 }).map((_, i) => (
+1156	            <Skeleton key={i} className="aspect-[2/3]" />
+1157	          ))}
+1158	        </div>
+1159	      </section>
+1160	    )
+1161	  }
+1162	
+1163	  if (!recs.data || recs.data.length === 0) return null
+1164	  const items = recs.data.slice(0, 12).map((r) => r.entry)
+1165	
+1166	  return (
+1167	    <section className="mt-12">
+1168	      <h2 className="mb-4 text-xl font-semibold tracking-wide text-white">{t('detail.recommendations')}</h2>
+1169	      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+1170	        {items.map((a) => (
+1171	          <AnimeCard key={a.mal_id} anime={a} />
+1172	        ))}
+1173	      </div>
+1174	    </section>
+1175	  )
+1176	}
+1177	
+1178	function DetailSkeleton() {
+1179	  return (
+1180	    <div className="grid gap-8 lg:grid-cols-[260px_1fr]">
+1181	      <Skeleton className="aspect-[2/3] w-full rounded-2xl" />
+1182	      <div className="space-y-4">
+1183	        <Skeleton className="h-10 w-2/3" />
+1184	        <Skeleton className="h-5 w-1/3" />
+1185	        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+1186	          {Array.from({ length: 12 }).map((_, i) => (
+1187	            <Skeleton key={i} className="h-14" />
+1188	          ))}
+1189	        </div>
+1190	        <Skeleton className="h-24 w-full" />
+1191	      </div>
+1192	    </div>
+1193	  )
+1194	}

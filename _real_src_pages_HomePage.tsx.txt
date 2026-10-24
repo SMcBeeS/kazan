@@ -1,0 +1,233 @@
+﻿1	import { Link } from 'react-router-dom'
+2	import type { ReactNode } from 'react'
+3	import { useI18n } from '../context/LanguageContext'
+4	import { anilist } from '../lib/anilist'
+5	import { useAsync } from '../hooks/useAsync'
+6	import { AnimeCard, AnimeCardSkeleton } from '../components/anime/AnimeCard'
+7	import { Carousel, CarouselItem } from '../components/anime/Carousel'
+8	import { HeroBanner } from '../components/anime/HeroBanner'
+9	import { GenreChips } from '../components/anime/GenreGrid'
+10	import { ContinueWatching, TasteSection } from '../components/anime/HomeSections'
+11	import { Skeleton } from '../components/ui/Feedback'
+12	import { ErrorState } from '../components/ui/States'
+13	import type { AnimeSummary } from '../lib/types'
+14	
+15	type SectionState<T> = {
+16	  data: T | null
+17	  loading: boolean
+18	  error: string | null
+19	  reload: () => void
+20	}
+21	
+22	/**
+23	 * HomePage â€” seasonal hero, trending carousel, latest episodes, seasonal,
+24	 * top-rated, and a popular-genres grid. Each section loads independently with
+25	 * its own loading / error / retry handling. Also renders the personalized
+26	 * "Continue Watching" and "Based on Your Taste" sections (#10).
+27	 */
+28	export default function HomePage() {
+29	  const { t } = useI18n()
+30	
+31	  const trending = useAsync((s) => anilist.getTopAnime('airing', 1, s).then((r) => r.data), [])
+32	  const seasonal = useAsync((s) => anilist.getSeasonNow(1, s).then((r) => r.data), [])
+33	  const popular = useAsync((s) => anilist.getTopAnime('bypopularity', 1, s).then((r) => r.data), [])
+34	
+35	  // Hero carousel gets the top seasonal anime (top 7), falling back to
+36	  // trending / popular so the banner is never empty (#1, #10).
+37	  const heroItems: AnimeSummary[] = (
+38	    seasonal.data ?? trending.data ?? popular.data ?? []
+39	  )
+40	    .slice(0, 7)
+41	
+42	  return (
+43	    <div>
+44	      <HeroBanner items={heroItems} />
+45	
+46	      {/* Continue Watching + taste-based recs (#10) */}
+47	      <ContinueWatching />
+48	
+49	      <Section
+50	        title={t('home.trending')}
+51	        subtitle={t('home.trendingSub')}
+52	        viewAllHref="/catalog?sort=popularity"
+53	        state={trending}
+54	        renderRow={(items) =>
+55	          items.map((a, i) => (
+56	            <CarouselItem key={a.mal_id}>
+57	              <AnimeCard anime={a} eager={i < 6} rank={i + 1} />
+58	            </CarouselItem>
+59	          ))
+60	        }
+61	      />
+62	
+63	      <LatestEpisodes />
+64	
+65	      <Section
+66	        title={t('home.seasonal')}
+67	        subtitle={t('home.seasonalSub')}
+68	        viewAllHref="/catalog"
+69	        state={seasonal}
+70	        renderRow={(items) =>
+71	          items.map((a) => (
+72	            <CarouselItem key={a.mal_id}>
+73	              <AnimeCard anime={a} />
+74	            </CarouselItem>
+75	          ))
+76	        }
+77	      />
+78	
+79	      <TasteSection />
+80	
+81	      <GenresSection />
+82	
+83	      <Section
+84	        title={t('home.topRated')}
+85	        subtitle={t('home.topRatedSub')}
+86	        viewAllHref="/catalog?sort=score"
+87	        state={popular}
+88	        renderRow={(items) =>
+89	          items.map((a) => (
+90	            <CarouselItem key={a.mal_id}>
+91	              <AnimeCard anime={a} />
+92	            </CarouselItem>
+93	          ))
+94	        }
+95	      />
+96	    </div>
+97	  )
+98	}
+99	
+100	/* ---------------------------- section wrapper ---------------------------- */
+101	
+102	function Section<T extends AnimeSummary[]>({
+103	  title,
+104	  subtitle,
+105	  viewAllHref,
+106	  state,
+107	  renderRow,
+108	}: {
+109	  title: string
+110	  subtitle?: string
+111	  viewAllHref?: string
+112	  state: SectionState<T>
+113	  renderRow: (items: T) => ReactNode
+114	}) {
+115	  if (state.loading) {
+116	    return (
+117	      <Carousel title={title} subtitle={subtitle} viewAllHref={viewAllHref}>
+118	        <AnimeCardSkeleton count={7} />
+119	      </Carousel>
+120	    )
+121	  }
+122	  if (state.error) {
+123	    return (
+124	      <section className="container-page py-8">
+125	        <h2 className="mb-4 text-xl font-semibold tracking-wide text-white sm:text-2xl">{title}</h2>
+126	        <ErrorState message={state.error} onRetry={state.reload} compact />
+127	      </section>
+128	    )
+129	  }
+130	  if (!state.data || state.data.length === 0) return null
+131	  return (
+132	    <Carousel title={title} subtitle={subtitle} viewAllHref={viewAllHref}>
+133	      {renderRow(state.data)}
+134	    </Carousel>
+135	  )
+136	}
+137	
+138	/* ----------------------------- genres grid ------------------------------ */
+139	
+140	function GenresSection() {
+141	  const { t } = useI18n()
+142	  const genres = useAsync((s) => anilist.getGenres(s).then((r) => r.data), [])
+143	
+144	  return (
+145	    <section className="container-page py-8">
+146	      <div className="mb-5">
+147	        <h2 className="flex items-center gap-2.5 text-xl font-semibold tracking-wide text-white sm:text-2xl">
+148	          <span className="h-6 w-1.5 rounded-full bg-white/80" aria-hidden="true" />
+149	          {t('home.genres')}
+150	        </h2>
+151	        <p className="mt-0.5 text-sm text-slate-400">{t('home.genresSub')}</p>
+152	      </div>
+153	      {genres.loading && (
+154	        <div className="no-scrollbar flex gap-3 overflow-hidden">
+155	          {Array.from({ length: 8 }).map((_, i) => (
+156	            <Skeleton key={i} className="h-[104px] w-28 shrink-0 rounded-2xl" />
+157	          ))}
+158	        </div>
+159	      )}
+160	      {genres.error && <ErrorState message={genres.error} onRetry={genres.reload} compact />}
+161	      {genres.data && <GenreChips genres={genres.data.slice(0, 16)} />}
+162	    </section>
+163	  )
+164	}
+165	
+166	/* --------------------------- latest episodes ---------------------------- */
+167	
+168	function LatestEpisodes() {
+169	  const { t } = useI18n()
+170	  const schedule = useAsync((s) => anilist.getSchedule(undefined, s).then((r) => r.data), [])
+171	
+172	  if (schedule.loading) {
+173	    return (
+174	      <Carousel title={t('home.latest')} subtitle={t('home.latestSub')}>
+175	        <AnimeCardSkeleton count={7} />
+176	      </Carousel>
+177	    )
+178	  }
+179	  if (schedule.error || !schedule.data) {
+180	    return (
+181	      <section className="container-page py-8">
+182	        <h2 className="mb-4 flex items-center gap-2.5 text-xl font-semibold tracking-wide text-white sm:text-2xl">
+183	          <span className="h-6 w-1.5 rounded-full bg-white/80" aria-hidden="true" />
+184	          {t('home.latest')}
+185	        </h2>
+186	        <ErrorState message={schedule.error ?? ''} onRetry={schedule.reload} compact />
+187	      </section>
+188	    )
+189	  }
+190	
+191	  const entries = schedule.data.slice(0, 20)
+192	  return (
+193	    <Carousel
+194	      title={t('home.latest')}
+195	      subtitle={t('home.latestSub')}
+196	      viewAllHref="/catalog?sort=episodes"
+197	    >
+198	      {entries.map((e) => (
+199	        <CarouselItem key={e.mal_id}>
+200	          <Link
+201	            to={`/anime/${e.mal_id}`}
+202	            className="group flex gap-3 rounded-2xl border border-night-700/70 bg-night-850/70 p-2 transition hover:border-slate-400/60 hover:shadow-glow-accent"
+203	          >
+204	            <div className="relative h-24 w-16 shrink-0 overflow-hidden rounded-lg">
+205	              {e.images?.jpg?.large_image_url || e.images?.jpg?.image_url ? (
+206	                <img
+207	                  src={e.images.jpg.large_image_url || e.images.jpg.image_url}
+208	                  alt={e.title}
+209	                  loading="lazy"
+210	                  className="h-full w-full object-cover transition group-hover:scale-105"
+211	                />
+212	              ) : (
+213	                <div className="flex h-full w-full items-center justify-center bg-night-850 text-slate-600">?</div>
+214	              )}
+215	            </div>
+216	            <div className="min-w-0 flex-1">
+217	              <h3 className="line-clamp-2 text-sm font-bold text-white">{e.title}</h3>
+218	              {e.episodes && e.episodes[0] && (
+219	                <p className="mt-1 text-xs text-slate-300">
+220	                  {t('watch.episode')} {e.episodes[0].mal_id}
+221	                </p>
+222	              )}
+223	              {e.broadcast?.string && (
+224	                <p className="mt-1 line-clamp-1 text-[11px] text-slate-500">{e.broadcast.string}</p>
+225	              )}
+226	            </div>
+227	          </Link>
+228	        </CarouselItem>
+229	      ))}
+230	    </Carousel>
+231	  )
+232	}
+233	

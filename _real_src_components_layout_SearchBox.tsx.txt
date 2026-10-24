@@ -1,0 +1,189 @@
+﻿1	import { useEffect, useId, useRef, useState, type RefObject } from 'react'
+2	import { Link } from 'react-router-dom'
+3	import { useI18n } from '../../context/LanguageContext'
+4	import { anilist, type AnimeSuggestion } from '../../lib/anilist'
+5	import { cx, formatLabel, formatScore } from '../../lib/utils'
+6	import { CloseIcon, SearchIcon, StarIcon } from '../icons'
+7	
+8	/** Debounce before firing a live-search request while typing. */
+9	const SEARCH_DEBOUNCE_MS = 250
+10	
+11	/**
+12	 * Live AniList search box. Typing (debounced 250ms) opens a floating dropdown of
+13	 * suggestions; clicking a row opens its detail page. Enter navigates to the
+14	 * catalog search results page for the query (/catalog?q=...).
+15	 */
+16	export function SearchBox({
+17	  className,
+18	  inputRef,
+19	  showShortcut = false,
+20	}: {
+21	  className?: string
+22	  inputRef?: RefObject<HTMLInputElement>
+23	  showShortcut?: boolean
+24	}) {
+25	  const { t, lang } = useI18n()
+26	  const wrapRef = useRef<HTMLFormElement>(null)
+27	  const listId = useId()
+28	  const [query, setQuery] = useState('')
+29	  const [open, setOpen] = useState(false)
+30	  const [loading, setLoading] = useState(false)
+31	  const [suggestions, setSuggestions] = useState<AnimeSuggestion[]>([])
+32	  const requestIdRef = useRef(0)
+33	  const abortRef = useRef<AbortController | null>(null)
+34	
+35	  const trimmed = query.trim()
+36	
+37	  // Debounced live suggestions. Stale responses are dropped via a request id;
+38	  // each new fetch aborts the previous in-flight one.
+39	  useEffect(() => {
+40	    const requestId = ++requestIdRef.current
+41	    if (!trimmed) {
+42	      abortRef.current?.abort()
+43	      setSuggestions([])
+44	      setLoading(false)
+45	      return
+46	    }
+47	    const timer = setTimeout(() => {
+48	      abortRef.current?.abort()
+49	      const controller = new AbortController()
+50	      abortRef.current = controller
+51	      setLoading(true)
+52	      anilist
+53	        .searchSuggestions(trimmed, controller.signal)
+54	        .then((items) => {
+55	          if (requestId !== requestIdRef.current) return
+56	          setSuggestions(items)
+57	          setLoading(false)
+58	        })
+59	        .catch(() => {
+60	          if (requestId === requestIdRef.current) setLoading(false)
+61	        })
+62	    }, SEARCH_DEBOUNCE_MS)
+63	    return () => clearTimeout(timer)
+64	  }, [trimmed])
+65	
+66	  // Dismiss the dropdown on outside click / Escape.
+67	  useEffect(() => {
+68	    if (!open) return
+69	    const onPointerDown = (e: MouseEvent) => {
+70	      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+71	    }
+72	    const onKeyDown = (e: KeyboardEvent) => {
+73	      if (e.key === 'Escape') setOpen(false)
+74	    }
+75	    document.addEventListener('mousedown', onPointerDown)
+76	    document.addEventListener('keydown', onKeyDown)
+77	    return () => {
+78	      document.removeEventListener('mousedown', onPointerDown)
+79	      document.removeEventListener('keydown', onKeyDown)
+80	    }
+81	  }, [open ])
+82	
+83	  // Abort any in-flight suggestion fetch on unmount.
+84	  useEffect(() => () => abortRef.current?.abort(), [])
+85	
+86	  const showDropdown = open && trimmed.length > 0
+87	
+88	  return (
+89	    <form
+90	      ref={wrapRef}
+91	      role="search"
+92	      className={className}
+93	      onSubmit={(e) => {
+94	        e.preventDefault()
+95	        setOpen(false)
+96	        if (trimmed) {
+97	          window.location.assign(`/catalog?q=${encodeURIComponent(trimmed)}`)
+98	        }
+99	      }}
+100	    >
+101	      <div className="relative">
+102	        <SearchIcon className="pointer-events-none absolute start-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+103	        <input
+104	          ref={inputRef}
+105	          value={query}
+106	          onChange={(e) => {
+107	            setQuery(e.target.value)
+108	            setOpen(true)
+109	          }}
+110	          onFocus={() => setOpen(true)}
+111	          placeholder={showShortcut ? `${t('nav.search')}  ( / )` : t('nav.search')}
+112	          aria-label={t('nav.search')}
+113	          aria-expanded={showDropdown}
+114	          aria-controls={listId}
+115	          role="combobox"
+116	          autoComplete="off"
+117	          className="h-11 w-full rounded-full border border-night-600/60 bg-slate-900/60 pe-9 ps-10 text-sm text-slate-100 shadow-inner backdrop-blur-md transition placeholder:text-slate-500 hover:border-night-600 focus:border-slate-400/70 focus:outline-none focus:ring-2 focus:ring-slate-500/40"
+118	        />
+119	        {query && (
+120	          <button
+121	            type="button"
+122	            onClick={() => {
+123	              setQuery('')
+124	              setSuggestions([])
+125	            }}
+126	            aria-label={t('common.close')}
+127	            className="absolute end-3 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-slate-400 transition hover:bg-night-700 hover:text-white"
+128	          >
+129	            <CloseIcon className="h-3.5 w-3.5" />
+130	          </button>
+131	        )}
+132	      </div>
+133	
+134	      {showDropdown && (
+135	        <div className="absolute inset-x-0 top-full z-50 pt-2">
+136	          <div
+137	            id={listId}
+138	            role="listbox"
+139	            className="card-surface max-h-80 overflow-y-auto p-1.5 shadow-card"
+140	          >
+141	            {loading && suggestions.length === 0 && (
+142	              <p className="px-3 py-4 text-center text-xs text-slate-500">{t('common.loading')}</p>
+143	            )}
+144	            {!loading && suggestions.length === 0 && (
+145	              <p className="px-3 py-4 text-center text-xs text-slate-500">
+146	                {t('catalog.noResults')}
+147	              </p>
+148	            )}
+149	            {suggestions.map((s) => (
+150	              <Link
+151	                key={s.id}
+152	                to={`/anime/${s.id}`}
+153	                role="option"
+154	                aria-selected="false"
+155	                onClick={() => setOpen(false)}
+156	                className="flex items-center gap-3 rounded-xl px-2 py-2 transition hover:bg-night-700/60"
+157	              >
+158	                <img
+159	                  src={s.coverImage}
+160	                  alt=""
+161	                  loading="lazy"
+162	                  className="h-12 w-9 shrink-0 rounded-md object-cover"
+163	                />
+164	                <span className="min-w-0 flex-1">
+165	                  <span className="block truncate text-sm font-semibold text-white">
+166	                    {s.title}
+167	                  </span>
+168	                  <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-400">
+169	                    {s.format && (
+170	                      <span className="rounded bg-night-700 px-1.5 py-px font-semibold uppercase">
+171	                        {formatLabel(s.format, lang)}
+172	                      </span>
+173	                    )}
+174	                    {s.averageScore != null && (
+175	                      <span className={cx('flex items-center gap-0.5 font-semibold text-gold-400')}>
+176	                        <StarIcon filled className="h-3 w-3" />
+177	                        {formatScore(s.averageScore)}
+178	                      </span>
+179	                    )}
+180	                  </span>
+181	                </span>
+182	              </Link>
+183	            ))}
+184	          </div>
+185	        </div>
+186	      )}
+187	    </form>
+188	  )
+189	}

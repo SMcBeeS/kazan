@@ -1,0 +1,10 @@
+﻿anilist.getAnime(
+anilist.getEpisodes(
+anilist.getGenres(
+anilist.getRecommendations(
+anilist.getRelations(
+anilist.getSchedule(
+anilist.getSeasonNow(
+anilist.getTopAnime(
+anilist.getUpcoming(
+anilist.searchAnime(

@@ -1,0 +1,5 @@
+﻿== AniPlayer/81/0 ERR The remote server returned an error: (404) Not Found. ==
+
+== AniPlayer/naruto-shippuden/0 ERR The remote server returned an error: (404) Not Found. ==
+
+== findbyrating ERR The remote server returned an error: (404) Not Found. ==

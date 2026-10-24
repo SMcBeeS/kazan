@@ -1,0 +1,196 @@
+=== LanguageContext.tsx ===
+/**
+ * LanguageProvider — manages active language + document direction (RTL/LTR).
+ */
+
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
+import { dictionaries, translate, LANGUAGES } from '../i18n'
+import type { Dict, Lang } from '../i18n'
+
+type Vars = Record<string, string | number>
+
+interface LanguageContextValue {
+  lang: Lang
+  dir: 'rtl' | 'ltr'
+  setLang: (lang: Lang) => void
+  toggleLang: () => void
+  t: (key: string, vars?: Vars) => string
+  dict: Dict
+}
+
+const LanguageContext = createContext<LanguageContextValue | null>(null)
+
+const STORAGE_KEY = 'animeverse:lang'
+
+function getInitialLang(): Lang {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (stored === 'ar' || stored === 'en') return stored as Lang
+  } catch {
+    /* ignore */
+  }
+  return 'en' as Lang
+}
+
+export function LanguageProvider({ children }: { children: ReactNode }) {
+  const [lang, setLangState] = useState<Lang>(getInitialLang)
+  const dir = LANGUAGES.find((l) => l.code === lang)?.dir ?? 'ltr'
+
+  useEffect(() => {
+    const html = document.documentElement
+    html.lang = lang
+    html.dir = dir
+    try {
+      localStorage.setItem(STORAGE_KEY, lang)
+    } catch {
+      /* ignore */
+    }
+  }, [lang, dir])
+
+  const setLang = useCallback((next: Lang) => setLangState(next), [])
+  const toggleLang = useCallback(
+    () => setLangState((prev) => (prev === 'ar' ? 'en' : 'ar')),
+    [],
+  )
+
+  const dict = dictionaries[lang]
+  const t = useCallback((key: string, vars?: Vars) => translate(dict, key, vars), [dict])
+
+  const value = useMemo<LanguageContextValue>(
+    () => ({ lang, dir, setLang, toggleLang, t, dict }),
+    [lang, dir, setLang, toggleLang, t, dict],
+  )
+
+  return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>
+}
+
+export function useI18n(): LanguageContextValue {
+  const ctx = useContext(LanguageContext)
+  if (!ctx) throw new Error('useI18n must be used within a LanguageProvider')
+  return ctx
+}
+=== translations.ts: dictionaries marker lines ===
+tr:8: export type Lang = 'ar' | 'en'
+tr:9: export type Dict = Record<string, string>
+tr:11: export const ar: Dict = {
+tr:29:   'notifications.empty': 'No new notifications / لا توجد إشعارات جديدة',
+tr:31:   'notifications.newEpisode': 'بثت {title} — الحلقة {n} الآن!',
+tr:32:   'notifications.unread': 'غير مقروءة',
+tr:33:   'notifications.clearAll': 'تم.',
+tr:344: export const en: Dict = {
+tr:602:   'notifications.empty': 'No new notifications',
+tr:604:   'notifications.newEpisode': '{title} — Episode {n} has just aired!',
+tr:605:   'notifications.unread': 'unread',
+tr:606:   'notifications.clearAll': 'Done.',
+=== i18n/index.ts ===
+/**
+ * i18n/index.ts — translation helper + dictionaries registry.
+ */
+
+import type { Dict, Lang } from './translations'
+import { ar, en } from './translations'
+
+export type { Dict, Lang }
+export { ar, en }
+
+export const dictionaries: Record<Lang, Dict> = { ar, en }
+
+export const LANGUAGES: { code: Lang; label: string; dir: 'rtl' | 'ltr' }[] = [
+  { code: 'ar', label: 'العربية', dir: 'rtl' },
+  { code: 'en', label: 'English', dir: 'ltr' },
+]
+
+/** Look up a key and interpolate {token} placeholders. */
+export function translate(
+  dict: Dict,
+  key: string,
+  vars?: Record<string, string | number>,
+): string {
+  let value = dict[key] ?? key
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) {
+      value = value.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v))
+    }
+  }
+  return value
+}
+
+=== WatchPage hints (342 lines) ===
+wp:1: import { useEffect, useMemo, useState } from 'react'
+wp:2: import { Link, useNavigate, useParams } from 'react-router-dom'
+wp:13: import { ArrowLeft, SendIcon, StarIcon, SubtitlesIcon } from '../components/icons'
+wp:16:  * WatchPage — episode player screen.
+wp:18:  * Resolves the authorized video sources for the episode via lib/videoSources,
+wp:19:  * renders the reusable VideoPlayer (source/quality/subtitle selection,
+wp:20:  * fullscreen, next/prev, local progress), records watch history, and shows a
+wp:21:  * side list of episodes for quick switching.
+wp:24:   const { id, episode } = useParams<{ id: string; episode: string }>()
+wp:25:   const animeId = Number(id)
+wp:26:   const episodeNumber = Math.max(1, parseInt(episode ?? '1', 10) || 1)
+wp:27:   const { t, lang } = useI18n()
+wp:28:   const { recordHistory, recordContinue } = useLibrary()
+wp:31:   const anime = useAsync((s) => anilist.getAnime(animeId, s).then((r) => r.data), [animeId])
+wp:32:   const episodes = useAsync((s) => anilist.getEpisodes(animeId, 1, s).then((r) => r.data), [animeId])
+wp:35:     () => resolveEpisodeSources({ animeId, episode: episodeNumber }),
+wp:36:     [animeId, episodeNumber],
+wp:39:   // For long-running series AniList leaves `episodes` null, so fall back to the
+wp:42:     anime.data?.episodes ??
+wp:43:     (anime.data?.nextAiringEpisode ? Math.max(0, anime.data.nextAiringEpisode.episode - 1) : null) ??
+wp:44:     episodes.data?.length ??
+wp:46:   const hasPrev = episodeNumber > 1
+wp:47:   const hasNext = totalEpisodes == null ? true : episodeNumber < totalEpisodes
+wp:50:   useEffect(() => {
+wp:52:       recordHistory(anime.data, {
+wp:53:         episode: episodeNumber,
+wp:54:         progress: totalEpisodes ? episodeNumber / totalEpisodes : undefined,
+wp:56:       recordContinue({
+wp:57:         animeId: anime.data.mal_id,
+wp:58:         title: anime.data.title_english || anime.data.title,
+wp:59:         episode: episodeNumber,
+wp:67:   }, [anime.data?.mal_id, episodeNumber])
+wp:86:   const goPrev = () => hasPrev && navigate(`/watch/${animeId}/${episodeNumber - 1}`)
+wp:87:   const goNext = () => hasNext && navigate(`/watch/${animeId}/${episodeNumber + 1}`)
+wp:89:   // Find metadata for the currently playing episode.
+wp:90:   const currentEpisode = episodes.data?.find((ep) => ep.mal_id === episodeNumber) ?? null
+wp:108:             animeId={animeId}
+wp:109:             episode={episodeNumber}
+wp:115:           {/* Series + current episode metadata */}
+wp:117:             <Link to={`/anime/${animeId}`} className="hidden h-28 w-20 shrink-0 overflow-hidden rounded-lg border border-night-700 sm:block">
+wp:121:                   alt={detail.title}
+wp:132:                   {detail.title_english || detail.title}
+wp:150:                   : `${t('watch.episode')} ${episodeNumber}${totalEpisodes != null ? ` / ${totalEpisodes}` : ''}`}
+wp:151:                 {!isMovie(detail.type) && currentEpisode?.aired && ` · ${new Date(currentEpisode.aired).toLocaleDateString()}`}
+wp:153:               {currentEpisode && (currentEpisode.title || currentEpisode.title_romanji) && (
+wp:155:                   {currentEpisode.title_romanji || currentEpisode.title}
+wp:167:           <EpisodeDiscussion episodeNumber={episodeNumber} />
+wp:172:           animeId={animeId}
+wp:173:           current={episodeNumber}
+wp:174:           episodes={episodes.data}
+wp:175:           loading={episodes.loading}
+wp:176:           error={episodes.error}
+wp:183: /* ---------------------------- episode sidebar ---------------------------- */
+wp:185: /* -------------------------- episode discussion --------------------------- */
+wp:188:  * EpisodeDiscussion — lightweight per-episode comment box rendered below the
+wp:192: function EpisodeDiscussion({ episodeNumber }: { episodeNumber: number }) {
+wp:193:   const { t } = useI18n()
+wp:207:         <SubtitlesIcon className="h-4 w-4 text-slate-300" />
+wp:210:           {t('watch.episode')} {episodeNumber}
+wp:255:   animeId,
+wp:257:   episodes,
+wp:261:   animeId: number
+wp:263:   episodes?: Episode[] | null
+wp:267:   const { t } = useI18n()
+wp:271:         <SubtitlesIcon className="h-4 w-4 text-slate-300" />
+wp:272:         <h2 className="text-sm font-bold text-white">{t('watch.episodes')}</h2>
+wp:283:         {!loading && (!episodes || episodes.length === 0) && (
+wp:287:         {episodes?.map((ep) => {
+wp:288:           const active = ep.mal_id === current
+wp:290:           // Upcoming episodes are shown but not clickable (#7).
+wp:294:                 key={ep.mal_id}
+wp:299:                   {ep.mal_id}
+wp:302:                   {ep.title_romanji || ep.title || `${t('detail.episode')} ${ep.mal_id}`}
+wp:312:               key={ep.mal_id}
+wp:313:               to={`/watch/${animeId}/${ep.mal_id}`}
+wp:327:                 {ep.mal_id}
+wp:331:                   {ep.title_romanji || ep.title || `${t('detail.episode')} ${ep.mal_id}`}

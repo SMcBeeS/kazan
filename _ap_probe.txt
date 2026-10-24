@@ -1,0 +1,15 @@
+﻿sort?bare  [200 application/json; charset=utf-8]  ["1",[{"_id":1,"Name":"Onmyou Kaiten Re:Birth","ImagePath":"https://cdn.myanimelist.net/images/anime/1933/150503.jpg","Genres":["action","fantasy"],"MALScore":"6.47","finder":"onmyou-kaiten-rebirth"},{"_id":2,"Name":"Dek
+sort?type=TV  [200 application/json; charset=utf-8]  ["1",[{"_id":1,"Name":"Onmyou Kaiten Re:Birth","ImagePath":"https://cdn.myanimelist.net/images/anime/1933/150503.jpg","Genres":["action","fantasy"],"MALScore":"6.47","finder":"onmyou-kaiten-rebirth"},{"_id":2,"Name":"Dek
+sort?sort=popularity  [200 application/json; charset=utf-8]  ["1",[{"_id":1,"Name":"Onmyou Kaiten Re:Birth","ImagePath":"https://cdn.myanimelist.net/images/anime/1933/150503.jpg","Genres":["action","fantasy"],"MALScore":"6.47","finder":"onmyou-kaiten-rebirth"},{"_id":2,"Name":"Dek
+sort?order=popularity  [200 application/json; charset=utf-8]  ["1",[{"_id":1,"Name":"Onmyou Kaiten Re:Birth","ImagePath":"https://cdn.myanimelist.net/images/anime/1933/150503.jpg","Genres":["action","fantasy"],"MALScore":"6.47","finder":"onmyou-kaiten-rebirth"},{"_id":2,"Name":"Dek
+sort?genre=action  [200 application/json; charset=utf-8]  ["1",[{"_id":1,"Name":"Onmyou Kaiten Re:Birth","ImagePath":"https://cdn.myanimelist.net/images/anime/1933/150503.jpg","Genres":["action","fantasy"],"MALScore":"6.47","finder":"onmyou-kaiten-rebirth"},{"_id":6,"Name":"Kij
+sort?status=airing  [200 application/json; charset=utf-8]  ["1",[{"_id":1,"Name":"Onmyou Kaiten Re:Birth","ImagePath":"https://cdn.myanimelist.net/images/anime/1933/150503.jpg","Genres":["action","fantasy"],"MALScore":"6.47","finder":"onmyou-kaiten-rebirth"},{"_id":2,"Name":"Dek
+genres  [ERR 404]  The remote server returned an error: (404) Not Found.
+genre  [ERR 404]  The remote server returned an error: (404) Not Found.
+findbygenre(bare)!  [ERR 404]  The remote server returned an error: (404) Not Found.
+genrelist  [ERR 404]  The remote server returned an error: (404) Not Found.
+upcoming  [ERR 404]  The remote server returned an error: (404) Not Found.
+season  [ERR 404]  The remote server returned an error: (404) Not Found.
+airing  [ERR 404]  The remote server returned an error: (404) Not Found.
+trending  [ERR 404]  The remote server returned an error: (404) Not Found.
+schedule  [ERR 404]  The remote server returned an error: (404) Not Found.

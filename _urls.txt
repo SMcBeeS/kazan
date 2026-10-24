@@ -1,0 +1,16 @@
+﻿https://anipub.org/AniPlayer/81/0
+https://anipub.org/api/airing
+https://anipub.org/api/findbyGenre
+https://anipub.org/api/findbyGenre/action
+https://anipub.org/api/findbyrating
+https://anipub.org/api/genre
+https://anipub.org/api/genrelist
+https://anipub.org/api/genres
+https://anipub.org/api/schedule
+https://anipub.org/api/searchall/naruto
+https://anipub.org/api/season
+https://anipub.org/api/sort
+https://anipub.org/api/trending
+https://anipub.org/api/upcoming
+https://www.anipub.org/Logo-1-AniPub.png
+https://www.anipub.org/video/7882/sub

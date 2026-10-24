@@ -1,0 +1,215 @@
+﻿1	/**
+2	 * utils.ts â€” small formatting / helper functions used across the UI.
+3	 */
+4	
+5	import type { AnimeSummary, JikanRelationEntry, JikanTrailer } from './types'
+6	
+7	/** Best available poster/cover image for an anime summary. */
+8	export function coverImage(anime: Pick<AnimeSummary, 'images'>): string {
+9	  const webp = anime.images?.webp
+10	  const jpg = anime.images?.jpg
+11	  return (
+12	    webp?.large_image_url ||
+13	    webp?.image_url ||
+14	    jpg?.large_image_url ||
+15	    jpg?.image_url ||
+16	    ''
+17	  )
+18	}
+19	
+20	/**
+21	 * Best available wide banner/backdrop image. Prefers AniList's dedicated
+22	 * `bannerImage` (a true cinematic wide shot); falls back to the poster so a
+23	 * hero/backdrop is never blank.
+24	 */
+25	export function bannerImage(anime: Pick<AnimeSummary, 'images' | 'bannerImage'>): string {
+26	  return anime.bannerImage || coverImage(anime) || ''
+27	}
+28	
+29	/**
+30	 * Safely strip AniList's HTML-ish markup (`<br>`, `<i>`, `<b>`, `<p>`, â€¦) from a
+31	 * synopsis down to clean, readable text. Newlines from `<br>`/paragraph breaks
+32	 * are preserved; entities are decoded. Never throws.
+33	 */
+34	export function stripHtml(html?: string | null): string {
+35	  if (!html) return ''
+36	  const text = html
+37	    .replace(/<br\s*\/?>/gi, '\n')
+38	    .replace(/<\/(p|div|li|h[1-6])>/gi, '\n\n')
+39	    .replace(/<[^>]+>/g, '')
+40	    .replace(/&nbsp;/g, ' ')
+41	    .replace(/&amp;/g, '&')
+42	    .replace(/&lt;/g, '<')
+43	    .replace(/&gt;/g, '>')
+44	    .replace(/&quot;/g, '"')
+45	    .replace(/&#039;/g, "'")
+46	    .replace(/&rsquo;/g, 'â€™')
+47	    .replace(/&lsquo;/g, 'â€˜')
+48	    .replace(/&hellip;/g, 'â€¦')
+49	    .replace(/&mdash;/g, 'â€”')
+50	    .replace(/&ndash;/g, 'â€“')
+51	    .replace(/[ \t]+\n/g, '\n')
+52	    .replace(/\n{3,}/g, '\n\n')
+53	    .trim()
+54	  return text
+55	}
+56	
+57	/** Best available image for a lightweight relations entry (no webp guaranteed). */
+58	export function relationImage(entry: Pick<JikanRelationEntry, 'images'>): string {
+59	  const webp = entry.images?.webp
+60	  const jpg = entry.images?.jpg
+61	  return (
+62	    webp?.large_image_url ||
+63	    webp?.image_url ||
+64	    jpg?.large_image_url ||
+65	    jpg?.image_url ||
+66	    ''
+67	  )
+68	}
+69	
+70	/**
+71	 * Resolve a playable YouTube embed URL from a Jikan trailer object.
+72	 * Prefers the canonical embed_url; falls back to building one from youtube_id.
+73	 */
+74	export function trailerEmbedUrl(trailer?: JikanTrailer | null): string | null {
+75	  if (!trailer) return null
+76	  if (trailer.embed_url) return trailer.embed_url
+77	  if (trailer.youtube_id) return `https://www.youtube.com/embed/${trailer.youtube_id}`
+78	  return null
+79	}
+80	
+81	/**
+82	 * Human-friendly content rating label. Jikan returns verbose strings like
+83	 * "PG-13 - Teens 13 or older" or "R - 17+ (violence & profanity)"; we keep only
+84	 * the rating code (before the first " - "), e.g. "PG-13", "R", "Rx".
+85	 */
+86	export function formatRating(rating?: string | null): string {
+87	  if (!rating) return 'â€”'
+88	  // Split on the first " - " that separates the code from the description.
+89	  const code = rating.split(/\s+-\s+/)[0].trim()
+90	  return code || rating.trim()
+91	}
+92	
+93	/** Compact airing status derived from the MAL `status` string. */
+94	export function airingStatus(status?: string | null): 'airing' | 'finished' | 'upcoming' | 'unknown' {
+95	  const s = (status ?? '').toLowerCase()
+96	  if (s.includes('currently airing') || s === 'airing') return 'airing'
+97	  if (s.includes('finished') || s === 'complete') return 'finished'
+98	  if (s.includes('not yet aired') || s === 'upcoming') return 'upcoming'
+99	  return 'unknown'
+100	}
+101	
+102	/** Compact integer formatting: 1200 -> 1.2K, 3_400_000 -> 3.4M. */
+103	export function formatCount(n?: number | null): string {
+104	  if (n == null) return 'â€”'
+105	  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M'
+106	  if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'K'
+107	  return String(n)
+108	}
+109	
+110	/** Score with one decimal, or a dash. */
+111	export function formatScore(score?: number | null): string {
+112	  if (score == null) return 'â€”'
+113	  return score.toFixed(1)
+114	}
+115	
+116	/** Seconds -> "h:mm:ss" / "m:ss" for player time display. */
+117	export function formatTime(seconds: number): string {
+118	  if (!Number.isFinite(seconds) || seconds < 0) return '0:00'
+119	  const s = Math.floor(seconds % 60)
+120	  const m = Math.floor((seconds / 60) % 60)
+121	  const h = Math.floor(seconds / 3600)
+122	  const pad = (n: number) => String(n).padStart(2, '0')
+123	  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`
+124	}
+125	
+126	/** Season + year, e.g. "Fall 2024". */
+127	export function formatSeason(season?: string | null, year?: number | null): string {
+128	  if (!season && !year) return 'â€”'
+129	  return `${season ?? ''} ${year ?? ''}`.trim()
+130	}
+131	
+132	/** Debounce a function by `wait` ms. */
+133	export function debounce<A extends unknown[]>(fn: (...args: A) => void, wait: number) {
+134	  let timer: ReturnType<typeof setTimeout> | undefined
+135	  return (...args: A) => {
+136	    if (timer) clearTimeout(timer)
+137	    timer = setTimeout(() => fn(...args), wait)
+138	  }
+139	}
+140	
+141	/** Join truthy class names. */
+142	export function cx(...parts: Array<string | false | null | undefined>): string {
+143	  return parts.filter(Boolean).join(' ')
+144	}
+145	
+146	/**
+147	 * Map an AniList format string (e.g. "TV", "MOVIE", "TV_SHORT") to the i18n key
+148	 * that holds its bilingual label, or null when we don't have a friendly label.
+149	 */
+150	export function formatLabelKey(type?: string | null): string | null {
+151	  if (!type) return null
+152	  const norm = type.replace(/[\s_]+/g, '_').toUpperCase()
+153	  switch (norm) {
+154	    case 'TV':
+155	      return 'format.tv'
+156	    case 'TV_SHORT':
+157	      return 'format.tvShort'
+158	    case 'MOVIE':
+159	      return 'format.movie'
+160	    case 'OVA':
+161	      return 'format.ova'
+162	    case 'ONA':
+163	      return 'format.ona'
+164	    case 'SPECIAL':
+165	      return 'format.special'
+166	    case 'MUSIC':
+167	      return 'format.music'
+168	    default:
+169	      return null
+170	  }
+171	}
+172	
+173	/**
+174	 * Per-language labels for an AniList format, used by formatLabel() so badges
+175	 * show ONLY the active language (e.g. "Ù…Ø³Ù„Ø³Ù„" in Arabic, "TV" in English)
+176	 * instead of the old combined "Ù…Ø³Ù„Ø³Ù„ / TV" strings (#5).
+177	 */
+178	const FORMAT_AR: Record<string, string> = {
+179	  TV: 'Ù…Ø³Ù„Ø³Ù„',
+180	  TV_SHORT: 'Ù…Ø³Ù„Ø³Ù„ Ù‚ØµÙŠØ±',
+181	  MOVIE: 'ÙÙŠÙ„Ù…',
+182	  OVA: 'Ø­Ù„Ù‚Ø© Ø®Ø§ØµØ©',
+183	  ONA: 'Ø£ÙˆÙ†Ø§',
+184	  SPECIAL: 'Ø³Ø¨ÙŠØ´Ù„',
+185	  MUSIC: 'Ù…ÙˆØ³ÙŠÙ‚Ù‰',
+186	}
+187	
+188	const FORMAT_EN: Record<string, string> = {
+189	  TV: 'TV',
+190	  TV_SHORT: 'TV Short',
+191	  MOVIE: 'Movie',
+192	  OVA: 'OVA',
+193	  ONA: 'ONA',
+194	  SPECIAL: 'Special',
+195	  MUSIC: 'Music',
+196	}
+197	
+198	/**
+199	 * Localized label for an AniList format, e.g. "Ù…Ø³Ù„Ø³Ù„" / "TV",
+200	 * "ÙÙŠÙ„Ù…" / "Movie", "Ø­Ù„Ù‚Ø© Ø®Ø§ØµØ©" / "OVA". Never combines both languages.
+201	 * Falls back to a title-cased version of the raw format string
+202	 * (underscores â†’ spaces) when we don't have a known label (#5, #9).
+203	 */
+204	export function formatLabel(type: string | null | undefined, lang: 'ar' | 'en'): string | null {
+205	  if (!type) return null
+206	  const norm = type.replace(/[\s_]+/g, '_').toUpperCase()
+207	  const map = lang === 'ar' ? FORMAT_AR : FORMAT_EN
+208	  if (map[norm]) return map[norm]
+209	  return type.replace(/_/g, ' ').toUpperCase()
+210	}
+211	
+212	/** True when the AniList format is a movie. */
+213	export function isMovie(type?: string | null): boolean {
+214	  return !!type && type.replace(/[\s_]+/g, '_').toUpperCase() === 'MOVIE'
+215	}
