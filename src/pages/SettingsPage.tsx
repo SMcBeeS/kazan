@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useI18n } from '../context/LanguageContext'
 import { useAuth } from '../context/AuthContext'
+import { useSettings } from '../context/SettingsContext'
 import { cx } from '../lib/utils'
 import { PlayIcon, SubtitlesIcon, LogOutIcon } from '../components/icons'
 
@@ -75,6 +76,7 @@ function ToggleSwitch({
 export default function SettingsPage() {
   const { t } = useI18n()
   const { user, logout } = useAuth()
+  const { settings, updateSettings } = useSettings()
   const [autoplay, setAutoplay] = useState(() => readBool(AUTOPLAY_KEY, true))
   const [remember, setRemember] = useState(() => readBool(REMEMBER_KEY, true))
   const [subtitles, setSubtitles] = useState<SubtitleChoice>(() => readSubtitle())
@@ -135,6 +137,32 @@ export default function SettingsPage() {
                   setRemember(next)
                   write(REMEMBER_KEY, next ? '1' : '0')
                 }}
+              />
+            </div>
+
+            {/* Auto-Skip Intros/Outros */}
+            <div className="flex items-center justify-between gap-4 px-5 py-4">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-100">{t('settings.autoSkipIntro')}</p>
+                <p className="mt-0.5 text-xs text-slate-400">{t('settings.autoSkipIntroHint')}</p>
+              </div>
+              <ToggleSwitch
+                checked={settings.autoSkipIntro}
+                label={t('settings.autoSkipIntro')}
+                onChange={(next) => updateSettings({ autoSkipIntro: next })}
+              />
+            </div>
+
+            {/* Auto-Play Next Episode */}
+            <div className="flex items-center justify-between gap-4 px-5 py-4">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-100">{t('settings.autoNextEpisode')}</p>
+                <p className="mt-0.5 text-xs text-slate-400">{t('settings.autoNextEpisodeHint')}</p>
+              </div>
+              <ToggleSwitch
+                checked={settings.autoNextEpisode}
+                label={t('settings.autoNextEpisode')}
+                onChange={(next) => updateSettings({ autoNextEpisode: next })}
               />
             </div>
 

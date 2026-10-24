@@ -6,6 +6,7 @@ import { AuthProvider } from './context/AuthContext'
 import { LanguageProvider } from './context/LanguageContext'
 import { LibraryProvider } from './context/LibraryContext'
 import { RoleProvider } from './context/RoleContext'
+import { SettingsProvider } from './context/SettingsContext'
 import { AuthModal } from './components/AuthModal'
 import { ToastProvider } from './components/ui/Toast'
 import './index.css'
@@ -19,12 +20,14 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
         <LanguageProvider>
           <LibraryProvider>
             <RoleProvider>
-              <ToastProvider>
-                <App />
+              <SettingsProvider>
+                <ToastProvider>
+                  <App />
+                </ToastProvider>
                 {/* Single shared sign-in / sign-up modal instance (opened via
                     useAuth().openAuthModal() from anywhere). */}
                 <AuthModal />
-              </ToastProvider>
+              </SettingsProvider>
             </RoleProvider>
           </LibraryProvider>
         </LanguageProvider>

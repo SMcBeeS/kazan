@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useI18n } from '../context/LanguageContext'
 import { useLibrary } from '../context/LibraryContext'
 import { useAuth } from '../context/AuthContext'
+import { useSettings } from '../context/SettingsContext'
 import { anilist } from '../lib/anilist'
 import { addToHistory, getComments, postComment } from '../lib/database'
 import type { Comment } from '../lib/database'
@@ -12,7 +13,8 @@ import { coverImage, formatLabel, formatRating, isMovie } from '../lib/utils'
 import type { Episode } from '../lib/types'
 import { Loading, Spinner } from '../components/ui/Feedback'
 import { ErrorState } from '../components/ui/States'
-import { VideoPlayer } from '../components/video/VideoPlayer'
+import { VideoPlayer } from '../components/ui/VideoPlayer'
+import type { SkipSegments } from '../components/ui/VideoPlayer'
 import { ArrowLeft, SendIcon, StarIcon, SubtitlesIcon, ClockIcon } from '../components/icons'
 
 /**
@@ -30,6 +32,7 @@ export default function WatchPage() {
   const { t, lang } = useI18n()
   const { recordHistory, recordContinue } = useLibrary()
   const { user } = useAuth()
+  const { settings } = useSettings()
   const navigate = useNavigate()
 
   const anime = useAsync((s) => anilist.getAnime(animeId, s).then((r) => r.data), [animeId])
@@ -39,6 +42,18 @@ export default function WatchPage() {
     () => resolveEpisodeSources({ animeId, episode: episodeNumber }),
     [animeId, episodeNumber],
   )
+
+  // Intro/outro skip segments for the current episode. Production wiring would
+  // hit the AniSkip.io API (`/skip/{mal_id}/{episode}`); until an API key is
+  // configured we fall back to a deterministic mock so the auto-skip feature
+  // is demonstrable (intro ~5min in, outro ~24min in of a ~25min episode).
+  const skipSegments = useMemo<SkipSegments | null>(() => {
+    // TODO: replace with live AniSkip fetch when ANISKIP_API_KEY is set.
+    return {
+      intro: { start: 300, end: 355 },
+      outro: { start: 1440, end: 1500 },
+    }
+  }, [])
 
   // For long-running series AniList leaves `episodes` null, so fall back to the
   // aired count derived from nextAiringEpisode (see lib/anilist.getEpisodes).
@@ -103,6 +118,13 @@ export default function WatchPage() {
   const goPrev = () => hasPrev && navigate(`/watch/${animeId}/${episodeNumber - 1}`)
   const goNext = () => hasNext && navigate(`/watch/${animeId}/${episodeNumber + 1}`)
 
+  // Auto-advance when the video ends (only when the setting is on).
+  const handleEnded = () => {
+    if (settings.autoNextEpisode && hasNext) {
+      navigate(`/watch/${animeId}/${episodeNumber + 1}`)
+    }
+  }
+
   // Find metadata for the currently playing episode.
   const currentEpisode = episodes.data?.find((ep) => ep.mal_id === episodeNumber) ?? null
 
@@ -126,6 +148,8 @@ export default function WatchPage() {
             episode={episodeNumber}
             onPrev={hasPrev ? goPrev : undefined}
             onNext={hasNext ? goNext : undefined}
+            onEnded={handleEnded}
+            skipSegments={skipSegments}
             poster={coverImage(detail)}
           />
 
