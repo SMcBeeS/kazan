@@ -12,7 +12,7 @@
  * Every step is defensive: network/storage failures never throw to the UI.
  */
 import { favorites } from './storage'
-import { anilist } from './anilist'
+import { anilist } from './anipub'
 
 const NS = 'animeverse:'
 const MAX = 30

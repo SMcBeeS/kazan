@@ -6,7 +6,7 @@ import {
   ShieldAlertIcon,
   SettingsIcon,
 } from '../components/icons'
-import { anilist } from '../lib/anilist'
+import { anilist } from '../lib/anipub'
 import { useAsync } from '../hooks/useAsync'
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']

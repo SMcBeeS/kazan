@@ -14,7 +14,7 @@ import {
   getWatchlist,
 } from '../lib/database'
 import type { Favorite, WatchlistStatus } from '../lib/database'
-import { anilist } from '../lib/anilist'
+import { anilist } from '../lib/anipub'
 import { useAsync } from '../hooks/useAsync'
 import { coverImage, cx, formatCount, formatLabel, formatScore, formatSeason, airingStatus, isMovie } from '../lib/utils'
 import type { AnimeDetail, Episode } from '../lib/types'

@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import { useI18n } from '../../context/LanguageContext'
 import { useLibrary } from '../../context/LibraryContext'
-import { anilist } from '../../lib/anilist'
+import { anilist } from '../../lib/anipub'
 import { useAsync } from '../../hooks/useAsync'
 import { topGenresFromHistory } from '../../lib/storage'
 import type { AnimeSummary } from '../../lib/types'

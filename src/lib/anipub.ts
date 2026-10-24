@@ -48,12 +48,26 @@ import type {
   JikanRelation,
   JikanRelationEntry,
   JikanStudio,
+  JikanTitle,
   Paginated,
   ScheduleEntry,
   SimpleList,
 } from './types'
 
 const BASE = 'https://anipub.org'
+
+/**
+ * Compatibility export. The old GraphQL client surfaced a typed error class;
+ * keep the same name available so anything catching `AniListError` still compiles.
+ */
+export class AniListError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'AniListError'
+    this.status = status
+  }
+}
 
 /* ============================================================================
  * Raw-API type mirrors (only the keys we actually read from the network)
@@ -300,11 +314,12 @@ function backoffMs(attempt: number): number {
 
 async function httpGet(
   path: string,
-  opts: { ttlMs: number; signal?: AbortSignal; noCache?: boolean } = { ttlMs: TTL_LIST },
+  opts: { ttlMs?: number; signal?: AbortSignal; noCache?: boolean } = {},
 ): Promise<unknown> {
+  const ttl = opts.ttlMs ?? TTL_LIST
   if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
   if (!opts.noCache) {
-    const hit = cacheGet(path, opts.ttlMs)
+    const hit = cacheGet(path, ttl)
     if (hit !== undefined) return hit
   }
   return enqueue(async () => {
@@ -370,13 +385,6 @@ function idOf(item: APBase): number {
   return toInt(item._id) ?? 0
 }
 
-/** AniPub URLs for detail/search use the `finder` slug. */
-function detailUrl(item: APBase): string {
-  const slug = asStr(item.finder)
-  if (!slug) return ''
-  return `https://anipub.org/details/${slug}`
-}
-
 /** Get-or-assign a stable mal_id for a genre name. Used by `buildGenres()`. */
 function genreMalId(name: string): number {
   const hit = genreMalIdByName.get(name)
@@ -396,7 +404,7 @@ function mapStatus(status: string | null | undefined): { status: string | null; 
   if (/finish|completed|complete/.test(s)) return { status: 'Finished Airing', airing: false }
   if (/upcoming|not.?yet|announc/.test(s)) return { status: 'Not yet aired', airing: false }
   if (/cancel/.test(s)) return { status: 'Cancelled', airing: false }
-  return { status: status, airing: false }
+  return { status: status ?? null, airing: false }
 }
 
 /** AniPub `Aired` is a human string ("Feb 15, 2007 to Mar 23, 2017"). */
@@ -488,7 +496,7 @@ function buildDescription(item: APBase): string | null {
 
 function seasonAndYear(item: APBase): { season: string | null; year: number | null } {
   const year = deriveAired(item)
-  const month = parseAiredRange(item.Aired)?.from.month ?? null
+  const month = parseAiredRange(item.Aired)?.prop.from.month ?? null
   if (month == null) return { season: null, year }
   if (month <= 3) return { season: 'winter', year }
   if (month <= 6) return { season: 'spring', year }
@@ -506,8 +514,8 @@ function toSummary(item: APBase): AnimeSummary {
   const durationMin = toInt(item.Duration)
   const durationStr = durationMin && durationMin > 0 ? `${durationMin} min` : (asStr(item.Rating) ?? '')
   return {
-    mal_id: item.Id,
-    url: `/anime/${item.Id}`,
+    mal_id: idOf(item),
+    url: `/anime/${idOf(item)}`,
     images: imagesFromUrl(img),
     approved: true,
     titles,
@@ -539,4 +547,376 @@ function toSummary(item: APBase): AnimeSummary {
     bannerImage: banner,
     nextAiringEpisode: null,
   }
+}
+
+/* ---------------- AniPub → Jikan mappers (detail / episodes) ---------------- */
+
+function toDetail(item: APBase): AnimeDetail {
+  const summary = toSummary(item)
+  const synonyms = parseList(item.Synonyms)
+  const explicit = ['r', 'r+', 'rx', '17+', '18+', 'hentai'].includes((summary.rating ?? '').toLowerCase())
+  return {
+    ...summary,
+    title_synonyms: synonyms,
+    background: summary.synopsis,
+    trailer: { youtube_id: null, url: null, embed_url: null },
+    producers: buildProducers(item),
+    licensors: [],
+    explicit,
+    broadcast: { day: null, time: null, timezone: null, string: null },
+  }
+}
+
+function toEpisodes(item: APBase, page: number): Paginated<Episode> {
+  const perPage = 50
+  const total = toInt(item.epCount) ?? 0
+  const safePage = Math.max(1, page)
+  const startIdx = (safePage - 1) * perPage
+  const endIdx = Math.min(startIdx + perPage, total)
+  const data: Episode[] = []
+  for (let n = startIdx + 1; n <= endIdx; n++) {
+    data.push({
+      mal_id: n,
+      title: null,
+      title_japanese: null,
+      title_romanji: null,
+      aired: null,
+      score: null,
+      filler: false,
+      recap: false,
+      forum_url: null,
+      url: null,
+      upcoming: false,
+    })
+  }
+  const lastPage = Math.max(1, Math.ceil(total / perPage))
+  return {
+    data,
+    pagination: {
+      last_visible_page: lastPage,
+      has_next_page: safePage < lastPage,
+      current_page: safePage,
+      items: { count: data.length, total, per_page: perPage },
+    },
+  }
+}
+
+/* ============================================================================
+ * Public Types & Utilities (drop-in replacements for anilist.ts exports)
+ * ========================================================================== */
+
+export interface AnimeSuggestion {
+  id: number
+  title: string
+  coverImage: string
+  format: string | null
+  averageScore: number | null
+}
+
+export interface ListParams {
+  q?: string
+  page?: number
+  limit?: number
+  order_by?: string
+  sort?: 'asc' | 'desc'
+  type?: string
+  status?: string
+  rating?: string
+  genres?: string
+  genre?: string
+  tags?: string
+  min_score?: number
+  max_score?: number
+  start_date?: string
+  end_date?: string
+  sfw?: boolean
+  letter?: string
+  verify_pagination?: boolean
+  /** AniList season, e.g. 'WINTER' | 'SPRING' | 'SUMMER' | 'FALL'. */
+  season?: string
+  /** Calendar year (4-digit). Paired with `season` to narrow a specific season. */
+  season_year?: number
+}
+
+export interface UpcomingAnime {
+  id: number
+  /** Best available title (english → romaji → native). */
+  title: string
+  /** Large poster URL (may be null for unreleased titles). */
+  coverImage: string | null
+  /** e.g. "WINTER", or null when an exact season hasn't been set. */
+  season: string | null
+  seasonYear: number | null
+}
+
+export function currentSeason(): { season: string; year: number } {
+  const now = new Date()
+  const month = now.getMonth()
+  const year = now.getFullYear()
+  let season: string
+  if (month <= 1 || month === 11) season = 'WINTER'
+  else if (month <= 4) season = 'SPRING'
+  else if (month <= 7) season = 'SUMMER'
+  else season = 'FALL'
+  return { season, year }
+}
+
+/* ============================================================================
+ * Public API — drop-in replacement for the `anilist` object (anilist.ts)
+ * ========================================================================== */
+
+const enc = (s: string): string => encodeURIComponent(s)
+
+/** Fetch a full AniPub detail object by numeric id. */
+async function detailOf(id: number, signal?: AbortSignal): Promise<APBase> {
+  const raw = await httpGet(`/api/info/${id}`, { ttlMs: TTL_DETAIL, signal })
+  return raw as APBase
+}
+
+/** Alias for the list-shape normaliser used throughout the public API. */
+function toList(raw: unknown): APBase[] {
+  return listFromResp(raw)
+}
+
+export const anilist = {
+  /* ---- search / catalog --------------------------------------------------- */
+
+  searchAnime(
+    params: ListParams = {},
+    signal?: AbortSignal,
+  ): Promise<Paginated<AnimeSummary>> {
+    const { q, genre, min_score, page, limit } = params
+    const limitVal = limit ?? 24
+    const pageVal = page ?? 1
+    // Route to the AniPub endpoint best matching the filter type:
+    //   free-text   → /api/searchall/:name
+    //   genre       → /api/findbyGenre/:slug  (primary genre only)
+    //   score-based → /api/findbyrating[?min_score=]
+    let path: string
+    if (q && q.trim()) {
+      path = `/api/searchall/${enc(q.trim())}`
+    } else if (genre && genre.trim()) {
+      const slugs = genre
+        .split(',')
+        .map((s) => genreSlug(s.trim()))
+        .filter(Boolean)
+      path = slugs.length > 0 ? `/api/findbyGenre/${enc(slugs[0])}` : '/api/findbyrating'
+    } else {
+      path = '/api/findbyrating'
+      if (min_score != null && min_score > 0) path += `?min_score=${min_score}`
+    }
+    return httpGet(path, { signal }).then(
+      (raw) => paginate(toList(raw).map(toSummary), pageVal, limitVal),
+    )
+  },
+
+  searchSuggestions(search: string, signal?: AbortSignal): Promise<AnimeSuggestion[]> {
+    const q = search.trim()
+    if (!q) return Promise.resolve([])
+    // /api/search/:name returns lightweight items with no score → null
+    return httpGet(`/api/search/${enc(q)}`, { ttlMs: 60_000, signal }).then(
+      (raw): AnimeSuggestion[] => {
+        const arr = Array.isArray(raw) ? (raw as APSearchHit[]) : []
+        return arr.slice(0, 10).map((h) => ({
+          id: h.Id ?? 0,
+          title: h.Name ?? '',
+          coverImage: resolvePic(h.Image) ?? '',
+          format: h.finder ?? null,
+          averageScore: null,
+        }))
+      },
+    )
+  },
+
+  /* ---- single-title lookups ---------------------------------------------- */
+
+  getAnime(id: number, signal?: AbortSignal): Promise<{ data: AnimeDetail }> {
+    return detailOf(id, signal).then((item) => ({ data: toDetail(item) }))
+  },
+
+  getAnimeLite(id: number, signal?: AbortSignal): Promise<{ data: AnimeSummary }> {
+    return detailOf(id, signal).then((item) => ({ data: toSummary(item) }))
+  },
+
+  getEpisodes(id: number, page = 1, signal?: AbortSignal): Promise<Paginated<Episode>> {
+    // AniPub provides the total episode count (epCount) but no per-episode
+    // metadata; toEpisodes() generates placeholder rows accordingly.
+    return detailOf(id, signal).then((item) => toEpisodes(item, page))
+  },
+
+  /* ---- relations / recommendations ---------------------------------------- */
+
+  getRelations(id: number, signal?: AbortSignal): Promise<SimpleList<JikanRelation>> {
+    // AniPub has no relations endpoint. Best-effort fallback: resolve the
+    // title's primary genre, then list same-genre peers as a "Similar" group.
+    return detailOf(id, signal)
+      .then((item) => {
+        const slugs = parseList(item.Genres).map(genreSlug)
+        if (slugs.length === 0) return { data: [] as JikanRelation[] }
+        return httpGet(`/api/findbyGenre/${enc(slugs[0])}`, { signal }).then(
+          (raw) => {
+            const peers: JikanRelationEntry[] = toList(raw)
+              .filter((p) => p._id !== item._id)
+              .slice(0, 20)
+              .map((p) => ({
+                mal_id: idOf(p),
+                url: `/anime/${idOf(p)}`,
+                images: imagesFromUrl(posterOf(p)),
+                name: nameOf(p),
+              }))
+            return { data: [{ relation: 'Similar', entry: peers }] as JikanRelation[] }
+          },
+        )
+      })
+      .catch(() => ({ data: [] as JikanRelation[] }))
+  },
+
+  getRecommendations(
+    id: number,
+    signal?: AbortSignal,
+  ): Promise<SimpleList<{ entry: AnimeSummary }>> {
+    // Same-genre peers as a standalone recommendation feed.
+    return detailOf(id, signal)
+      .then((item) => {
+        const slugs = parseList(item.Genres).map(genreSlug)
+        if (slugs.length === 0) return { data: [] as { entry: AnimeSummary }[] }
+        return httpGet(`/api/findbyGenre/${enc(slugs[0])}`, { signal }).then(
+          (raw) => {
+            const peers = toList(raw)
+              .filter((p) => p._id !== item._id)
+              .slice(0, 12)
+              .map(toSummary)
+            return { data: peers.map((entry) => ({ entry })) }
+          },
+        )
+      })
+      .catch(() => ({ data: [] as { entry: AnimeSummary }[] }))
+  },
+
+  /* ---- list / season endpoints ------------------------------------------ */
+
+  getTopAnime(
+    filter: 'airing' | 'upcoming' | 'bypopularity' | 'favorite' = 'bypopularity',
+    page = 1,
+    signal?: AbortSignal,
+  ): Promise<Paginated<AnimeSummary>> {
+    // /findbyrating is the only ranked list in AniPub. Narrow by status where
+    // the filter calls for it; bypopularity/favorite return the full list.
+    return httpGet('/api/findbyrating', { signal }).then((raw) => {
+      const all = toList(raw).map(toSummary)
+      const narrowed =
+        filter === 'airing'
+          ? all.filter((a) => a.airing)
+          : filter === 'upcoming'
+            ? all.filter((a) => a.status === 'Not yet aired')
+            : all
+      return paginate(narrowed, page, 24)
+    })
+  },
+
+  getSeasonNow(page = 1, signal?: AbortSignal): Promise<Paginated<AnimeSummary>> {
+    // AniPub has no explicit season filter. Approximate "this season" as
+    // currently-airing titles that premiered in the current calendar year.
+    const { year } = currentSeason()
+    return httpGet('/api/findbyrating', { signal }).then((raw) => {
+      const matching = toList(raw)
+        .map(toSummary)
+        .filter((a) => a.airing && (a.year ?? 0) === year)
+      return paginate(matching, page, 24)
+    })
+  },
+
+  /**
+   * AniPub has no airing-schedule endpoint → always resolves to an empty
+   * list. The Schedule page handles the empty state gracefully.
+   */
+  getSchedule(
+    _day?: string,
+    _signal?: AbortSignal,
+    _range?: { start: number; end: number },
+  ): Promise<SimpleList<ScheduleEntry>> {
+    return Promise.resolve({ data: [] as ScheduleEntry[] })
+  },
+
+  getUpcoming(limit = 10, signal?: AbortSignal): Promise<SimpleList<UpcomingAnime>> {
+    // /api/getlast returns the numeric id of the most recently added title.
+    // Resolve it into a single-entry "newly added" rail; empty on error.
+    return httpGet('/api/getlast', { signal }).then(async (raw) => {
+      const lastId = toInt(raw)
+      if (lastId == null || lastId <= 0) return { data: [] as UpcomingAnime[] }
+      try {
+        const item = await detailOf(lastId, signal)
+        const s = toSummary(item)
+        const entry: UpcomingAnime = {
+          id: s.mal_id,
+          title: s.title,
+          coverImage: s.images.jpg.image_url || null,
+          season: s.season,
+          seasonYear: s.year,
+        }
+        return { data: [entry].slice(0, limit) }
+      } catch {
+        return { data: [] as UpcomingAnime[] }
+      }
+    })
+  },
+
+  getGenres(_signal?: AbortSignal): Promise<SimpleList<Genre>> {
+    return Promise.resolve({ data: DEFAULT_GENRES })
+  },
+}
+
+/* ============================================================================
+ * AnimeMeta / fetchAnimeMetadata
+ * Drop-in replacement for the equivalent exports in anilist.ts.
+ * ========================================================================== */
+
+export interface AnimeMeta {
+  id: number
+  title: string
+  coverImage: string | null
+}
+
+/** Per-tab in-memory cache so the same id is never re-fetched. */
+const metaCache = new Map<number, AnimeMeta>()
+
+/**
+ * Batch-resolve AniPub ids into lightweight display summaries
+ * (id + best title + large cover). Used by the profile list views.
+ *
+ * - De-duplicates input and drops non-positive / non-integer ids.
+ * - Returns `[]` for empty input.
+ * - Never throws: a blocked / failed request for a single id degrades to an
+ *   empty entry so the caller can fall back to its `#<id>` labels.
+ */
+export async function fetchAnimeMetadata(
+  idList: number[],
+  signal?: AbortSignal,
+): Promise<AnimeMeta[] | null> {
+  const ids = [
+    ...new Set(idList.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0)),
+  ]
+  if (ids.length === 0) return []
+  const result: AnimeMeta[] = []
+  for (const id of ids) {
+    const cached = metaCache.get(id)
+    if (cached) {
+      result.push(cached)
+      continue
+    }
+    try {
+      const item = await detailOf(id, signal)
+      const meta: AnimeMeta = {
+        id,
+        title: nameOf(item),
+        coverImage: posterOf(item) || null,
+      }
+      metaCache.set(id, meta)
+      result.push(meta)
+    } catch {
+      // Degrade to an empty entry; caller knows how to show "#<id>"
+      result.push({ id, title: '', coverImage: null })
+    }
+  }
+  return result
 }

@@ -20,8 +20,8 @@ import {
   getPublicWatchlist,
 } from '../lib/database'
 import type { Profile, Favorite, HistoryEntry, WatchlistEntry, WatchlistStatus } from '../lib/database'
-import { fetchAnimeMetadata } from '../lib/anilist'
-import type { AnimeMeta } from '../lib/anilist'
+import { fetchAnimeMetadata } from '../lib/anipub'
+import type { AnimeMeta } from '../lib/anipub'
 import { EmptyState } from '../components/ui/States'
 import { Spinner } from '../components/ui/Feedback'
 import { cx } from '../lib/utils'

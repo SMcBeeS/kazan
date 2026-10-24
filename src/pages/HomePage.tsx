@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { useI18n } from '../context/LanguageContext'
-import { anilist } from '../lib/anilist'
+import { anilist } from '../lib/anipub'
 import { useAsync } from '../hooks/useAsync'
 import { AnimeCard, AnimeCardSkeleton } from '../components/anime/AnimeCard'
 import { Carousel, CarouselItem } from '../components/anime/Carousel'

@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type RefObject } from 'react'
 import { Link } from 'react-router-dom'
 import { useI18n } from '../../context/LanguageContext'
-import { anilist, type AnimeSuggestion } from '../../lib/anilist'
+import { anilist, type AnimeSuggestion } from '../../lib/anipub'
 import { cx, formatLabel, formatScore } from '../../lib/utils'
 import { CloseIcon, SearchIcon, StarIcon } from '../icons'
 

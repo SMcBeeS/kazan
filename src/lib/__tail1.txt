@@ -1,0 +1,106 @@
+/* ============================ AniPub -> Jikan mappers ============================ */
+
+/** Build Jikan `title` / `title_english` / `title_japanese` / `titles[]`
+ *  from AniPub's single `Name` plus the optional `English` / `Native`
+ *  aliases. */
+function buildTitles(item: APBase): {
+  title: string
+  title_english: string | null
+  title_japanese: string | null
+  titles: JikanTitle[]
+} {
+  const canonical = nameOf(item) || 'Unknown'
+  const englishRaw = asStr((item as Record<string, unknown>).English)
+  const nativeRaw = asStr((item as Record<string, unknown>).Native) ?? nativeFromName(canonical)
+  const hasKana = (s: string | null): boolean => !!(s && /[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff]/.test(s))
+  const english = englishRaw && englishRaw !== canonical ? englishRaw : null
+  const japanese = hasKana(nativeRaw) && nativeRaw && nativeRaw !== canonical ? nativeRaw : (hasKana(canonical) ? canonical : null)
+  const titles: JikanTitle[] = [{ type: 'Default', title: canonical }]
+  if (english) titles.push({ type: 'English', title: english })
+  if (japanese) titles.push({ type: 'Japanese', title: japanese })
+  return { title: canonical, title_english: english, title_japanese: japanese, titles: titles.slice(0, 5) }
+}
+
+/** If the canonical display name contains Japanese characters, treat it as
+ *  the native title too (AniPub sometimes only hands us one form). */
+function nativeFromName(canonical: string): string | null {
+  return /[\u3040-\u30ff\u4e00-\u9fff]/.test(canonical) ? canonical : null
+}
+
+function buildSynopsis(item: APBase): string | null {
+  const raw = asStr(item.DescripTion) || asStr((item as Record<string, unknown>).Synopsis)
+  if (!raw) return null
+  const plain = raw.replace(/<[^>]+>/g, ' ').replace(/\s{2,}/g, ' ').trim()
+  return plain || null
+}
+
+function seasonAndYear(item: APBase): { season: string | null; year: number | null } {
+  const year = deriveAired(item)
+  const month = parseAiredRange(item.Aired)?.from.month ?? null
+  if (month == null) return { season: null, year }
+  if (month <= 3) return { season: 'winter', year }
+  if (month <= 6) return { season: 'spring', year }
+  if (month <= 9) return { season: 'summer', year }
+  return { season: 'fall', year }
+}
+
+function buildDuration(item: APBase): string {
+  return asStr(item.Duration) ?? ''
+}
+
+function buildType(item: APBase): { type: string | null; format: string | null } {
+  const raw = asStr(item.Type) ?? asStr((item as Record<string, unknown>).Format)
+  if (!raw) return { type: null, format: null }
+  const t = raw.toLowerCase()
+  if (t === 'tv' || t.startsWith('tv ')) return { type: 'TV', format: 'TV' }
+  if (t === 'movie' || t === 'film' || t.startsWith('movie ')) return { type: 'Movie', format: 'MOVIE' }
+  if (t === 'ova') return { type: 'OVA', format: 'OVA' }
+  if (t === 'ona') return { type: 'ONA', format: 'ONA' }
+  if (t === 'special') return { type: 'Special', format: 'SPECIAL' }
+  if (t === 'music') return { type: 'Music', format: 'MUSIC' }
+  return { type: raw, format: raw.toUpperCase() }
+}
+
+function toSummary(item: APBase): AnimeSummary {
+  const img = posterOf(item)
+  const banner = bannerOf(item)
+  const { title, title_english, title_japanese, titles } = buildTitles(item)
+  const { status, airing } = mapStatus(item.Status)
+  const { season, year } = seasonAndYear(item)
+  const { type, format } = buildType(item)
+  const id = idOf(item)
+  return {
+    mal_id: id,
+    url: `/anime/${id}`,
+    images: imagesFromUrl(img),
+    approved: true,
+    titles,
+    title,
+    title_english,
+    title_japanese,
+    type,
+    format,
+    source: 'Unknown',
+    episodes: toInt(item.epCount),
+    status,
+    airing,
+    aired: buildAired(item),
+    duration: buildDuration(item),
+    rating: null,
+    score: toScore(item.MALScore),
+    scored_by: toInt(item.RatingsNum),
+    rank: null,
+    popularity: null,
+    members: null,
+    favorites: null,
+    synopsis: buildSynopsis(item),
+    season,
+    year,
+    studios: buildStudios(item),
+    genres: buildGenres(item),
+    themes: [],
+    demographics: [],
+    bannerImage: banner,
+    nextAiringEpisode: null,
+  }
+}
