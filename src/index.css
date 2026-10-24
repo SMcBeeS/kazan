@@ -28,17 +28,6 @@
     @apply border-night-700;
   }
 
-  /* Force every Arabic-detected text element to render in Cairo. The provider
-     sets <html lang> and dir per language, so this covers ALL Arabic UI (nav,
-     labels, anime titles) as soon as the app switches to AR / RTL. */
-  html[lang='ar'],
-  html[lang='ar'] body {
-    @apply font-cairo;
-  }
-  [dir='rtl'] {
-    @apply font-cairo;
-  }
-
   :focus-visible {
     @apply outline-none ring-2 ring-slate-400/60 ring-offset-2 ring-offset-night-950;
   }
@@ -86,56 +75,8 @@
       transition hover:bg-white/10 hover:text-white;
   }
 
-  /* Custom range sliders used by the video player (timeline + volume).
-     Two overlapping "fills" — a dim buffered bar (`--buffered`) behind a
-     bright progress bar (`--progress`) — rendered with a masked track. */
-  .slider {
-    @apply relative h-1.5 w-full cursor-pointer appearance-none rounded-full
-      bg-white/15 transition-[height] duration-200 hover:h-2.5;
-    background-color: rgba(255, 255, 255, 0.15);
-    background-image:
-      linear-gradient(to right, rgb(148 163 184 / 0.4) 0%, rgb(148 163 184 / 0.4) var(--buffered), transparent var(--buffered), transparent 100%),
-      linear-gradient(to right, #e2e8f0 0%, #e2e8f0 var(--progress), transparent var(--progress), transparent 100%);
-    outline: none;
-  }
-  .slider::-webkit-slider-thumb {
-    appearance: none;
-    -webkit-appearance: none;
-    width: 13px;
-    height: 13px;
-    border-radius: 9999px;
-    background: #fff;
-    box-shadow: 0 0 0 3px rgb(255 255 255 / 20%), 0 1px 4px rgb(0 0 0 / 50%);
-    transition: transform 120ms ease;
-  }
-  .slider:hover::-webkit-slider-thumb,
-  .slider:active::-webkit-slider-thumb {
-    transform: scale(1.15);
-  }
-  .slider::-moz-range-thumb {
-    width: 13px;
-    height: 13px;
-    border: none;
-    border-radius: 9999px;
-    background: #fff;
-    box-shadow: 0 0 0 3px rgb(255 255 255 / 20%), 0 1px 4px rgb(0 0 0 / 50%);
-    transition: transform 120ms ease;
-  }
-  .slider::-moz-range-track {
-    background: transparent;
-    height: 100%;
-  }
-  .slider:disabled {
-    @apply cursor-default opacity-40;
-  }
-
   .skeleton {
     @apply relative overflow-hidden bg-night-800;
-    /* Promote the whole skeleton to its own GPU layer so the ::after shimmer
-       sweeps off the main thread (do not set `transform` on ::after itself —
-       that would be overridden by the shimmer keyframe animation). */
-    will-change: transform;
-    transform: translateZ(0);
   }
   .skeleton::after {
     @apply absolute inset-0 -translate-x-full animate-shimmer bg-gradient-to-r
@@ -194,23 +135,6 @@
   .animate-portal-float { animation: portal-float 5s ease-in-out infinite; }
   .animate-portal-pulse { animation: portal-pulse 4s ease-in-out infinite; }
 
-  /* Offload every CSS animation to the GPU: promote to compositor layers and
-     force hardware acceleration so continuous rotation/pulse/float never
-     triggers main-thread layout or paint (keeps pages locked at 60 FPS). */
-  .animate-portal-spin,
-  .animate-portal-spin-slow,
-  .animate-portal-orbit,
-  .animate-portal-spin-rev,
-  .animate-portal-float,
-  .animate-portal-pulse,
-  .animate-fade-in,
-  .animate-fade-up,
-  .animate-shimmer {
-    will-change: transform, opacity;
-    transform: translateZ(0);
-    backface-visibility: hidden;
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .animate-portal-spin,
     .animate-portal-spin-slow,
@@ -252,4 +176,7 @@ video::cue {
   background: rgba(0, 0, 0, 0.75);
   color: #fff;
   font-size: 1rem;
-}
+}@keyframes splash-fade-in {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+  }
