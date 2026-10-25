@@ -24,7 +24,7 @@ export function RootLayout() {
         <div className="container-page relative z-40 flex flex-wrap items-center gap-x-2 gap-y-2 pt-1.5 sm:pt-2">
           <HeaderBar />
         </div>
-        <main id="main" className="flex-1 pb-24 lg:pb-0">
+        <main id="main" className="flex-1 pb-24">
           <PageTransition>
             <Outlet />
           </PageTransition>

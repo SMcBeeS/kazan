@@ -1,9 +1,10 @@
-﻿/// <reference types="node" />
+/// <reference types="node" />
 
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
 import type { AnimeSummary } from '../../lib/types'
+import { anilist } from '../../lib/anipub'
 import { useI18n } from '../../context/LanguageContext'
 import { coverImage, cx } from '../../lib/utils'
 import { ArrowLeft, ArrowRight, PlayIcon } from '../icons'
@@ -39,19 +40,34 @@ export function HeroBanner({ items }: { items: AnimeSummary[] }) {
   // paused while it is scrolled out of view so hidden slides never churn.
   const sectionRef = useRef<HTMLElement | null>(null)
   const [inView, setInView] = useState(true)
-  // Mal ids whose wide banner measured below the high-res threshold on load.
-  const [lowResBanners, setLowResBanners] = useState<Set<number>>(() => new Set())
-  const markLowRes = (malId: number, width: number) => {
-    if (width >= 1280) return
-    setLowResBanners((prev) => {
-      if (prev.has(malId)) return prev
-      const next = new Set(prev)
-      next.add(malId)
-      return next
-    })
-  }
-
   const count = items.length
+
+  // The list feeds only carry vertical posters. For each slide we lazily fetch
+  // the title's HORIZONTAL key-art banner via /api/info/:id (cached, routed
+  // through the fast "light" queue). Until one resolves we show the poster as a
+  // blurred backdrop placeholder so the banner never reads as a stretched
+  // vertical image.
+  const [banners, setBanners] = useState<Record<number, string>>({})
+  useEffect(() => {
+    if (count === 0) return
+    let cancelled = false
+    const ids = items.map((a) => a.mal_id)
+    setBanners({})
+    ids.forEach((id) => {
+      anilist
+        .getAniBanner(id)
+        .then((url) => {
+          if (cancelled || !url) return
+          setBanners((prev) => (prev[id] === url ? prev : { ...prev, [id]: url }))
+        })
+        .catch(() => {
+          /* keep the poster placeholder when banner fetch fails */
+        })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [items, count])
 
   // Keep the active index in range if the list shrinks.
   useEffect(() => {
@@ -107,7 +123,7 @@ export function HeroBanner({ items }: { items: AnimeSummary[] }) {
     <div className="container-page relative">
     <section
       ref={sectionRef}
-      className="relative isolate h-[54vh] min-h-[380px] w-full overflow-hidden rounded-3xl shadow-card ring-1 ring-night-700/60"
+      className="relative isolate h-[42vh] min-h-[300px] max-h-[440px] w-full overflow-hidden rounded-3xl shadow-card ring-1 ring-night-700/60"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}
@@ -115,62 +131,60 @@ export function HeroBanner({ items }: { items: AnimeSummary[] }) {
       aria-roledescription="carousel"
     >
       {/*
-        Crossfading backgrounds â€” every slide fills the container edge-to-edge.
-        A wide bannerImage renders with object-cover; when a banner is missing
-        or narrow, the container is filled with a blurred scale-110 crop of the
-        coverImage and the crisp poster artwork is placed gracefully to the side.
-        No empty black pillarbars are ever rendered.
+        Crossfading backgrounds — every slide fills the container edge-to-edge
+        with its horizontal key art, fetched from the detail endpoint and
+        rendered with object-cover. A shimmer placeholder fills the slide
+        while that image loads.
       */}
-      {items.map((a, i) => {
-        const banner = a.bannerImage || ''
-        const lowRes = lowResBanners.has(a.mal_id)
-        const wide = Boolean(banner) && !lowRes
-        const cover = coverImage(a)
-        const src = wide ? banner : (cover || banner)
-        if (!src) return null
+{items.map((a, i) => {
+        // The list feed only carries the vertical poster (`ImagePath`). The
+        // horizontal key art lives on the detail endpoint, so we fetch it
+        // lazily for each slide; `banners[id]` holds the resolved landscape
+        // image. Once present it is the full-bleed background of the slide —
+        // a genuinely wide image, so it fills the card without being cropped
+        // or zoomed like a low-res poster would be.
+        const horizontal = banners[a.mal_id] || ''
+        const poster = coverImage(a) || a.bannerImage || ''
         const loading = i === 0 ? 'eager' : 'lazy'
+
+        // Pick the source and whether to blur:
+        //   horizontal banner (wide landscape) → crisp, no blur
+        //   vertical poster (fallback)         → blurred color-wash
+        //   neither                            → gradient placeholder
+        const src = horizontal || poster
+        const useBlur = !horizontal && !!poster
+
         return (
           <div
             key={a.mal_id}
             aria-hidden="true"
             style={SLIDE_LAYER_STYLE}
             className={cx(
-              "absolute inset-0 transition-opacity duration-700 ease-in-out",
-              i === active ? "opacity-100" : "opacity-0",
+              'absolute inset-0 transition-opacity duration-700 ease-in-out',
+              i === active ? 'opacity-100' : 'opacity-0',
             )}
           >
-            {/* Ambient blurred backdrop Ã¢â‚¬â€ always fills edge-to-edge */}
-            <img
-              src={wide ? banner : cover}
-              alt=""
-              loading={loading}
-              decoding="async"
-              className="absolute inset-0 h-full w-full scale-110 object-cover object-center blur-2xl opacity-40"
-            />
-            {wide ? (
+            {src ? (
               <img
                 src={src}
-                alt=""
+                alt=''
                 loading={loading}
-                decoding="async"
-                onLoad={(e) => markLowRes(a.mal_id, e.currentTarget.naturalWidth)}
-                className="absolute inset-0 h-full w-full object-cover object-center"
+                decoding='async'
+                className={cx(
+                  'absolute inset-0 h-full w-full object-cover object-center',
+                  useBlur && 'scale-125 blur-2xl opacity-50',
+                )}
               />
             ) : (
-              <img
-                src={src}
-                alt=""
-                loading={loading}
-                decoding="async"
-                className="relative block h-full max-w-[60%] object-contain object-right"
-              />
+              <div className='absolute inset-0 bg-gradient-to-br from-night-800 via-night-900 to-night-950' />
             )}
           </div>
         )
       })}
 
-      <div className="absolute inset-0 bg-gradient-to-t from-[#030712]/80 via-[#030712]/40 to-transparent" />
-      <div className="absolute inset-0 bg-gradient-to-r from-[#030712] via-[#030712]/60 to-transparent rtl:bg-gradient-to-l" />
+      {/* Single, lighter horizontal gradient: keeps the left-aligned copy legible
+          while letting the key-art stay clearly visible (no heavy bottom scrim). */}
+      <div className="absolute inset-0 bg-gradient-to-r from-night-900/90 via-night-900/40 to-transparent rtl:bg-gradient-to-l" />
 
       {/* Content â€” keyed so the fade-up animation replays per slide */}
       <div className="relative flex h-full flex-col justify-end px-5 pb-16 pt-24 sm:px-8 sm:pb-16">

@@ -13,7 +13,7 @@
  * it renders a clean sign-in prompt rather than erroring.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { useI18n } from '../context/LanguageContext'
@@ -40,6 +40,9 @@ import { cx } from '../lib/utils'
 
 type Tab = 'history' | 'favorites' | 'watchlist'
 
+/** Upper bound for an avatar file (kept under the ~5MB localStorage ceiling). */
+const MAX_AVATAR_BYTES = 4 * 1024 * 1024
+
 /** Format an ISO timestamp to a short, locale-aware date string. */
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '—'
@@ -59,6 +62,12 @@ export default function ProfilePage() {
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState({ username: '', bio: '', avatar_url: '' })
   const [saving, setSaving] = useState(false)
+  // Avatar drag-and-drop state: whether a file is being dragged over the zone.
+  const [dragging, setDragging] = useState(false)
+  // Guards the file picker while a FileReader is in flight.
+  const [picking, setPicking] = useState(false)
+  // Ref to the hidden file input so the dropzone click can open the picker.
+  const avatarInputRef = useRef<HTMLInputElement>(null)
 
   // Active tab + the two data lists driven off the database.
   const [tab, setTab] = useState<Tab>('history')
@@ -179,6 +188,43 @@ export default function ProfilePage() {
     setEditing(false)
   }, [user, form, t])
 
+  /**
+   * Read a picked/dropped image file and convert it to a Base64 data URL,
+   * which is then stored in `form.avatar_url` exactly like a pasted URL would
+   * have been. Files above MAX_AVATAR_BYTES are rejected to stay well clear of
+   * the ~5MB localStorage ceiling.
+   */
+  const handleAvatarFile = useCallback(
+    (file: File | null | undefined) => {
+      if (!file) return
+      if (!/^image\/(png|jpe?g|webp)$/i.test(file.type)) {
+        window.alert(`${t('profile.avatarInvalidType')}: ${file.name}`)
+        return
+      }
+      if (file.size > MAX_AVATAR_BYTES) {
+        window.alert(
+          `${t('profile.avatarTooLarge')} (${(file.size / 1024 / 1024).toFixed(1)}MB) — ≤ ${MAX_AVATAR_BYTES / 1024 / 1024}MB`,
+        )
+        return
+      }
+      setPicking(true)
+      const reader = new FileReader()
+      reader.onload = () => {
+        const dataUrl = reader.result
+        setPicking(false)
+        if (typeof dataUrl === 'string' && dataUrl) {
+          setForm((f) => ({ ...f, avatar_url: dataUrl }))
+        }
+      }
+      reader.onerror = () => {
+        setPicking(false)
+        window.alert(`${t('common.error')}: ${file.name}`)
+      }
+      reader.readAsDataURL(file)
+    },
+    [t],
+  )
+
   const togglePrivacy = useCallback(
     async (key: 'is_watchlist_public' | 'is_favorites_public') => {
       if (!user || !profile) return
@@ -292,13 +338,69 @@ export default function ProfilePage() {
                   onChange={(v) => setForm((f) => ({ ...f, username: v }))}
                   placeholder={email?.split('@')[0] ?? ''}
                 />
-                <TextInput
-                  label={t('profile.avatarUrl')}
-                  type="url"
-                  value={form.avatar_url}
-                  onChange={(v) => setForm((f) => ({ ...f, avatar_url: v }))}
-                  placeholder="https://…"
-                />
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-semibold text-slate-400">{t('profile.avatarUpload')}</span>
+                  <input
+                    ref={avatarInputRef}
+                    type="file"
+                    accept="image/png, image/jpeg, image/webp"
+                    className="hidden"
+                    onChange={(e) => {
+                      handleAvatarFile(e.target.files?.[0])
+                      e.target.value = ''
+                    }}
+                  />
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label={t('profile.avatarUpload')}
+                    onClick={() => avatarInputRef.current?.click()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        avatarInputRef.current?.click()
+                      }
+                    }}
+                    onDragOver={(e) => {
+                      e.preventDefault()
+                      setDragging(true)
+                    }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={(e) => {
+                      e.preventDefault()
+                      setDragging(false)
+                      handleAvatarFile(e.dataTransfer.files?.[0])
+                    }}
+                    className={cx(
+                      'flex min-h-[96px] cursor-pointer flex-col items-center justify-center gap-1 rounded-xl border-2 border-dashed px-4 py-4 text-center transition',
+                      dragging
+                        ? 'border-emerald-400/80 bg-emerald-500/10 text-emerald-200'
+                        : 'border-night-600/80 bg-night-850/60 text-slate-400 hover:border-slate-400/60 hover:text-slate-300',
+                    )}
+                  >
+                    {form.avatar_url ? (
+                      <img
+                        src={form.avatar_url}
+                        alt=""
+                        className="mb-2 h-16 w-16 rounded-xl object-cover"
+                      />
+                    ) : (
+                      <AvatarIcon className="h-6 w-6" />
+                    )}
+                    {picking ? (
+                      <span className="text-xs font-semibold">{t('profile.avatarReading')}</span>
+                    ) : form.avatar_url ? (
+                      <span className="text-xs font-semibold">{t('profile.avatarReplace')}</span>
+                    ) : (
+                      <span className="text-xs font-semibold">
+                        {t('profile.avatarDrag')}
+                        <span className="block text-[11px] font-normal text-slate-500">
+                          {t('profile.avatarHint')}
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                </div>
                 <label className="flex flex-col gap-1.5">
                   <span className="text-xs font-semibold text-slate-400">{t('profile.bio')}</span>
                   <textarea

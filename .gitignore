@@ -38,3 +38,6 @@ nodeinstall.log
 
 .vercel
 .env*
+
+.vercel
+.env*

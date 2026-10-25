@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useI18n } from '../../context/LanguageContext'
 import { useLibrary } from '../../context/LibraryContext'
 import { useAuth } from '../../context/AuthContext'
@@ -9,7 +9,6 @@ import {
   GridIcon,
   HeartIcon,
   HistoryIcon,
-  HomeIcon,
   CalendarIcon,
   SettingsIcon,
   ShieldAlertIcon,
@@ -328,7 +327,6 @@ export function Sidebar() {
   const navigate = useNavigate()
 
   const navItems = [
-    { to: '/', end: true, label: t('nav.home'), icon: HomeIcon },
     { to: '/catalog', end: false, label: t('nav.catalog'), icon: GridIcon },
     { to: '/favorites', end: true, label: t('nav.favorites'), icon: HeartIcon, count: favorites.length },
     { to: '/history', end: true, label: t('nav.history'), icon: HistoryIcon, count: history.length },
@@ -346,10 +344,14 @@ export function Sidebar() {
   return (
     <>
       <aside className="sticky top-0 z-40 hidden h-screen w-56 shrink-0 flex-col gap-2 overflow-y-auto border-e border-night-700/70 bg-night-900/60 px-3 py-5 backdrop-blur-lg lg:flex xl:w-60">
-        <div id="kazan-brand-target" className="inline-flex w-fit items-center gap-3 px-2">
-          <BrandMark />
-          <BrandTitle />
-        </div>
+        <Link
+            id="kazan-brand-target"
+            to="/"
+            className="inline-flex w-fit items-center gap-3 rounded-lg px-2 py-1 transition hover:opacity-80 focus-visible:opacity-100"
+          >
+            <BrandMark />
+            <BrandTitle />
+          </Link>
 
         <nav className="mt-6 flex flex-col gap-1.5" aria-label={t('nav.menu')}>
           {navItems.map((item) => (
@@ -447,7 +449,7 @@ export function Sidebar() {
         className="fixed inset-x-0 bottom-0 z-40 border-t border-night-700/70 bg-night-900/90 backdrop-blur-lg lg:hidden"
         aria-label={t('nav.menu')}
       >
-        <div className="mx-auto grid max-w-lg grid-cols-4 gap-1 px-3 py-2">
+        <div className="mx-auto grid max-w-lg grid-cols-3 gap-1 px-3 py-2">
           {navItems.map((item) => (
             <NavLink
               key={item.to}

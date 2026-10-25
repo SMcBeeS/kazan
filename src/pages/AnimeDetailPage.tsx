@@ -294,10 +294,17 @@ export default function AnimeDetailPage() {
   // viewed episode + total whenever an episode is opened).
   const histEntry = history.find((h) => h.mal_id === detail.mal_id)
   const contEntry = continueWatching.find((c) => c.animeId === detail.mal_id)
-  const totalEp = detail.episodes ?? contEntry?.totalEpisodes ?? null
+  // Auto-complete gate: the watched count must equal the *true* API total
+  // (`detail.episodes`). The earlier `>=` check, combined with a stale
+  // `contEntry.totalEpisodes` captured from a 50-row paginated list, made long
+  // series flip to "Completed" at episode 50. Now:
+  //   - if the API total is null/unknown → only an explicitly stored `completed`
+  //     status wins (we never infer completion), and
+  //   - `watchedEp` must be exactly the true total, not ≥ it (no overshoot).
+  const apiTotal = detail.episodes
   const watchedEp = histEntry?.episode ?? contEntry?.episode ?? 0
   const isCompleted =
-    totalEp != null && totalEp > 0 && watchedEp >= totalEp
+    apiTotal != null && apiTotal > 0 && watchedEp === apiTotal
       ? true
       : watchStatus === 'completed'
 
@@ -926,7 +933,7 @@ function EpisodesSection({
 }) {
   const { t } = useI18n()
   const [page, setPage] = useState(1)
-  const episodes = useAsync((s) => anilist.getEpisodes(animeId, page, s).then((r) => r), [animeId, page])
+  const episodes = useAsync((s) => anilist.getEpisodes(animeId, page, s, { perPage: 50 }).then((r) => r), [animeId, page])
 
   const total =
     episodes.data?.pagination.items.total ??

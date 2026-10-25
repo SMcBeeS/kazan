@@ -86,7 +86,13 @@ interface APBase {
   Aired?: string | null
   Premiered?: string | number | null
   Duration?: string | null
-  epCount?: number | null
+  /* AniPub exposes the total episode count under one (or both) of these
+   * camel-case keys depending on the endpoint. `epCount` is kept as a legacy
+   * fallback but is NOT reliably returned — always try `EpisodeCount` / `Ep`
+   * first (that is what toSummary reads). */
+  EpisodeCount?: number | string | null
+  Ep?: number | string | null
+  epCount?: number | string | null
   Synonyms?: string[] | string | null
   /* AniPub mixes free-form comma-strings and arrays across endpoints, so both. */
   Studios?: string[] | string | null
@@ -126,8 +132,15 @@ function parseList(v: unknown): string[] {
 function resolvePic(v: unknown): string | null {
   const raw = asStr(v)
   if (!raw) return null
-  if (/^https?:\/\//i.test(raw)) return raw
-  try { return new URL(raw, BASE).toString() } catch { return (BASE + raw.replace(/^\/+/, '')) }
+  const url = raw.trim()
+  // Already an absolute http(s) URL — use as-is (e.g. myanimelist / netflix CDN).
+  if (/^https?:\/\//i.test(url)) return url
+  // Protocol-relative (e.g. `//cdn.example.com/a.jpg`) — pin to https.
+  if (url.startsWith('//')) return `https:${url}`
+  // Relative path (`dekin-no-mogura.webp` or `/images/cover.jpg`) → prepend the
+  // AniPub origin so covers, posters and banners all resolve off anipub.org.
+  const suffix = url.replace(/^\/+/, '')
+  return `${BASE.replace(/\/+$/, '')}/${suffix}`
 }
 /* Best-effort season/year from a few possible source fields. */
 function deriveAired(item: APBase): number | null {
@@ -214,6 +227,21 @@ function listFromResp(r: unknown): APBase[] {
   }
   return []
 }
+/** True when a value looks like an AniPub anime record (vs. an envelope field). */
+function isApItem(x: unknown): x is APBase {
+  return !!x && typeof x === 'object' && 'Name' in (x as Record<string, unknown>)
+}
+/**
+ * Parse the `/api/sort` payload, which answers `[ total, items[] ]` (a top-level
+ * array whose second element is the actual anime list). Falls back to treating
+ * the top-level array as the item list if no inner array is found.
+ */
+function toSortList(raw: unknown): APBase[] {
+  if (!Array.isArray(raw)) return []
+  const items = raw.find((x) => Array.isArray(x))
+  if (Array.isArray(items)) return (items as unknown[]).filter(isApItem)
+  return (raw as unknown[]).filter(isApItem)
+}
 /** Slice one page out of an in-memory results array. */
 function paginate<T>(entries: T[], page: number, limit: number): Paginated<T> {
   const per = Math.max(1, Math.floor(limit) || 24)
@@ -235,30 +263,58 @@ function paginate<T>(entries: T[], page: number, limit: number): Paginated<T> {
 /* ============================================================================
  * Queue / throttle
  *
- * AniPub's documented rate limit is roughly 1 request / 30s (an early probe
- * hit 429s within a burst). We serialise every network call through one queue
- * and make sure two actually-dispatched requests are at least 32s apart. The
- * app fires only a handful of requests per page visit, so a generous interval
- * keeps us far from 429 territory without hurting UX. Callers can pass an
- * AbortSignal to cancel an in-flight request; aborts never poison the queue.
+ * AniPub's documented rate limit (~1 request / 30s, 429s on burst) applies to
+ * the *streaming details* endpoint (`/v1/api/details`) only; the plain
+ * metadata endpoints (/api/search, /api/info, /api/findbyrating,
+ * /api/findbyGenre, /api/sort, /anime/api/details) are not documented as
+ * limited. We therefore run two independent serial queues:
+ *
+ *   1. STRICT  — `/v1/api/details` only: ~32s between actually-dispatched
+ *      requests (Phase-2 video source lookups go through here).
+ *   2. LIGHT   — everything else: ~650ms between requests, fast enough for a
+ *      smooth home page while still serial (no bursts).
+ *
+ * 429s on either queue are retried with a generous backoff (and Retry-After is
+ * honored), so an undocumented limit is handled by waiting and trying again
+ * rather than failing. Callers can pass an AbortSignal to cancel an in-flight
+ * request; aborts never poison the queue.
  * ========================================================================== */
-const ANIPUB_MIN_INTERVAL = 32_000 // ms between two actually-dispatched requests
-let lastRequestAt = 0
-let chain: Promise<unknown> = Promise.resolve()
+type Queue = 'strict' | 'light'
+
+const STRICT_MIN_INTERVAL = 32_000 // ms — streaming details endpoint
+const LIGHT_MIN_INTERVAL = 650 // ms — metadata endpoints
+/** Matches only the rate-limited streaming-details endpoint, in either form
+ *  (`https://anipub.org/v1/api/details?…` and relative `/v1/api/details`). */
+const DETAILS_ENDPOINT = /^(?:https?:\/\/[^/]+)?\/v1\/api\/details(?:[?#]|$)/
+const DETAILS_BASE = /^(?:https?:\/\/[^/]+)?\/anime\/api\/details(?:[?#]|$)/
+
+const queues: Record<Queue, { lastAt: number; chain: Promise<unknown> }> = {
+  strict: { lastAt: 0, chain: Promise.resolve() },
+  light: { lastAt: 0, chain: Promise.resolve() },
+}
+
+function queueFor(path: string): Queue {
+  // /anime/api/details is explicitly a non-limited alias (different shape);
+  // only /v1/api/details is the documented rate-limited streaming endpoint.
+  if (DETAILS_BASE.test(path) && !DETAILS_ENDPOINT.test(path)) return 'light'
+  return DETAILS_ENDPOINT.test(path) ? 'strict' : 'light'
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise(res => setTimeout(res, ms))
 }
 
-function enqueue<T>(work: () => Promise<T>): Promise<T> {
-  const next = chain.then(async () => {
-    const wait = lastRequestAt + ANIPUB_MIN_INTERVAL - Date.now()
+function enqueue<T>(queue: Queue, work: () => Promise<T>): Promise<T> {
+  const q = queues[queue]
+  const interval = queue === 'strict' ? STRICT_MIN_INTERVAL : LIGHT_MIN_INTERVAL
+  const next = q.chain.then(async () => {
+    const wait = q.lastAt + interval - Date.now()
     if (wait > 0) await sleep(wait)
-    lastRequestAt = Date.now()
+    q.lastAt = Date.now()
     return work()
   })
   // A rejection inside work must not break subsequent queued entries.
-  chain = next.then(
+  q.chain = next.then(
     () => undefined,
     () => undefined,
   )
@@ -309,7 +365,9 @@ const TTL_DETAIL = 5 * 60 * 1000
 const RETRY_ATTEMPTS = 3
 
 function backoffMs(attempt: number): number {
-  return Math.min(30_000, 10_000 * Math.pow(2.5, attempt))
+  // 429/5xx backoff: wait a long time before retrying (the strict queue's
+  // 32 s interval re-applies on top of this inside enqueue).
+  return Math.min(90_000, 15_000 * Math.pow(2.5, attempt - 1)) // 15 s, 37.5 s, 90 s
 }
 
 async function httpGet(
@@ -322,7 +380,8 @@ async function httpGet(
     const hit = cacheGet(path, ttl)
     if (hit !== undefined) return hit
   }
-  return enqueue(async () => {
+  const queue = queueFor(path)
+  return enqueue(queue, async () => {
     let attempt = 0
     for (;;) {
       if (attempt >= RETRY_ATTEMPTS)
@@ -355,6 +414,75 @@ async function httpGet(
       await sleep(Math.max(Number.isFinite(retryMs) && retryMs > 0 ? retryMs : 0, backoffMs(attempt)))
     }
   })
+}
+
+/* ============================================================================
+ * Video source fetching (Phase 2)
+ *
+ * The app already uses the *native AniPub id* as its global `animeId` (it is the
+ * same value that feeds `/api/info/:id` above and populates the `/watch/:id/:episode`
+ * route). We therefore pass it straight to the streaming-details endpoint — there
+ * is no title search, sanitisation, or id-mapping fallback anywhere in this path.
+ *
+ * Rate limiting + caching are handled by the transport above, exactly as required:
+ *   - `queueFor()` routes this path to the STRICT queue → 32s spacing, and the first
+ *     enqueue fires immediately that session (`lastAt` starts at 0), only subsequent
+ *     requests are delayed;
+ *   - failed responses (429 / network / non-ok) are NEVER written to the cache —
+ *     `cacheSet` only ever runs on a 2xx body — so a temporary 429 resolves to a
+ *     fresh retry on the next call instead of permanently locking the episode.
+ * ========================================================================== */
+
+export interface EpisodeStream {
+  /** Direct/playlist playback URL for the requested episode. */
+  url: string
+}
+
+/** Minimal shape of the `/v1/api/details` body we read (rest is ignored). */
+interface ApDetailBody {
+  local?: {
+    link?: string | null
+    ep?: Array<{ link?: string | null }> | null
+  } | null
+  [k: string]: unknown
+}
+
+/**
+ * Fetch the playable link for a single episode, addressing it by the native
+ * AniPub id. No search, no sanitisation — the id goes straight into the URL.
+ *
+ * Episode indexing follows the exact AniPub schema:
+ *   - `episodeNumber === 1` → `body.local.link`           (top-level)
+ *   - `episodeNumber >  1`  → `body.local.ep[n - 2].link` (array, 0-based)
+ *
+ * Any failure (429 / network / missing link) is re-thrown with a clear message
+ * and is *not* cached (see the transport above), so the UI can surface a retry
+ * rather than a dead "Episode Unavailable" state.
+ */
+export async function getEpisodeLink(
+  aniPubId: number,
+  episodeNumber: number,
+  signal?: AbortSignal,
+): Promise<EpisodeStream> {
+  const ep = Math.max(1, Math.floor(episodeNumber))
+  // Path matches DETAILS_ENDPOINT → STRICT queue (32s; first request is immediate).
+  const raw = (await httpGet(`/v1/api/details/${aniPubId}`, {
+    ttlMs: TTL_DETAIL,
+    signal,
+  })) as ApDetailBody
+
+  const local = raw?.local
+  const link =
+    ep === 1
+      ? local?.link
+      : (Array.isArray(local?.ep) ? local.ep[ep - 2]?.link : undefined)
+
+  if (!link) {
+    throw new Error(
+      `AniPub: no stream link for episode ${ep} (id ${aniPubId}). The episode is not available yet — please retry shortly.`,
+    )
+  }
+  return { url: link }
 }
 
 /* ============================================================================
@@ -549,6 +677,29 @@ function toSummary(item: APBase): AnimeSummary {
   }
 }
 
+/** A single placeholder episode row (AniPub exposes no per-episode metadata). */
+function makePlaceholderEpisode(n: number): Episode {
+  return {
+    mal_id: n, title: null, title_japanese: null, title_romanji: null,
+    aired: null, score: null, filler: false, recap: false,
+    forum_url: null, url: null, upcoming: false,
+  }
+}
+
+/** Build a homepage / schedule entry (card + a "latest episode" affordance). */
+function toScheduleEntry(item: APBase): ScheduleEntry {
+  const s = toSummary(item)
+  return {
+    mal_id: s.mal_id,
+    title: s.title,
+    url: s.url,
+    images: { jpg: s.images.jpg },
+    synopsis: s.synopsis,
+    episodes: [makePlaceholderEpisode(1)],
+    broadcast: { day: null, time: null, timezone: null, string: null },
+  }
+}
+
 /* ---------------- AniPub → Jikan mappers (detail / episodes) ---------------- */
 
 function toDetail(item: APBase): AnimeDetail {
@@ -567,12 +718,36 @@ function toDetail(item: APBase): AnimeDetail {
   }
 }
 
-function toEpisodes(item: APBase, page: number): Paginated<Episode> {
-  const perPage = 50
-  const total = toInt(item.epCount) ?? 0
-  const safePage = Math.max(1, page)
-  const startIdx = (safePage - 1) * perPage
-  const endIdx = Math.min(startIdx + perPage, total)
+/**
+ * Resolve the authoritative total-episode count from an AniPub detail object.
+ * AniPub returns the count under `EpisodeCount` (preferred) or `Ep`, with a
+ * legacy `epCount` key on some payloads. `toEpisodes` previously read ONLY the
+ * dead `epCount` field, so every series resolved to 0 and the newest episodes
+ * were silently dropped. Fall back to whatever non-zero value AniPub provides.
+ */
+function totalEpisodesOf(item: APBase): number {
+  const n = toInt(item.EpisodeCount) ?? toInt(item.Ep) ?? toInt(item.epCount) ?? 0
+  return n > 0 ? n : 0
+}
+
+/**
+ * Generate placeholder episode rows for the AniPub catalog. AniPub only
+ * provides the total episode count — individual rows are produced here.
+ * `perPage` caps the window returned for a single page; callers that want the
+ * full series at once can pass a large (or 0 = "no cap") value so the returned
+ * array length equals the API-reported total.
+ */
+function toEpisodes(item: APBase, page: number, perPage: number): Paginated<Episode> {
+  const total = totalEpisodesOf(item)
+  // `perPage <= 0` or non-finite means "no cap" — return every episode in one
+  // page. This is the path WatchPage uses to render the full series length
+  // without a 50-row artificial ceiling.
+  const noCap = !Number.isFinite(perPage) || perPage <= 0
+  const safePerPage = noCap ? total : Math.max(1, Math.floor(perPage))
+  const lastPage = noCap ? 1 : Math.max(1, Math.ceil(total / safePerPage))
+  const safePage = noCap ? 1 : Math.max(1, Math.min(page, lastPage))
+  const startIdx = (safePage - 1) * safePerPage
+  const endIdx = Math.min(startIdx + safePerPage, total)
   const data: Episode[] = []
   for (let n = startIdx + 1; n <= endIdx; n++) {
     data.push({
@@ -589,14 +764,13 @@ function toEpisodes(item: APBase, page: number): Paginated<Episode> {
       upcoming: false,
     })
   }
-  const lastPage = Math.max(1, Math.ceil(total / perPage))
   return {
     data,
     pagination: {
       last_visible_page: lastPage,
       has_next_page: safePage < lastPage,
       current_page: safePage,
-      items: { count: data.length, total, per_page: perPage },
+      items: { count: data.length, total, per_page: safePerPage },
     },
   }
 }
@@ -734,14 +908,35 @@ export const anilist = {
     return detailOf(id, signal).then((item) => ({ data: toDetail(item) }))
   },
 
+  /**
+   * The HORIZONTAL key-art banner for one title. The list feeds
+   * (/api/sort, /api/findbyrating) carry only the vertical poster
+   * (ImagePath), but the detail endpoint (/api/info/:id) also exposes `Cover`
+   * — a wide landscape image distinct from the poster (e.g. `…-1920.webp`).
+   * Returns ONLY the resolved horizontal banner, or '' when the title has no
+   * dedicated landscape banner (callers decide their own fallback, e.g. the
+   * blurred vertical poster from the list feed).
+   */
+  getAniBanner(id: number, signal?: AbortSignal): Promise<string> {
+    return detailOf(id, signal).then((item) => resolvePic(item.Cover) || '')
+  },
+
   getAnimeLite(id: number, signal?: AbortSignal): Promise<{ data: AnimeSummary }> {
     return detailOf(id, signal).then((item) => ({ data: toSummary(item) }))
   },
 
-  getEpisodes(id: number, page = 1, signal?: AbortSignal): Promise<Paginated<Episode>> {
+  getEpisodes(
+    id: number,
+    page = 1,
+    signal?: AbortSignal,
+    options?: { perPage?: number },
+  ): Promise<Paginated<Episode>> {
     // AniPub provides the total episode count (epCount) but no per-episode
     // metadata; toEpisodes() generates placeholder rows accordingly.
-    return detailOf(id, signal).then((item) => toEpisodes(item, page))
+    // `perPage: 0` (the default) returns the full series in a single page;
+    // pass an explicit number to page the list (AnimeDetailPage).
+    const perPage = options?.perPage ?? 0
+    return detailOf(id, signal).then((item) => toEpisodes(item, page, perPage))
   },
 
   /* ---- relations / recommendations ---------------------------------------- */
@@ -800,42 +995,67 @@ export const anilist = {
     page = 1,
     signal?: AbortSignal,
   ): Promise<Paginated<AnimeSummary>> {
-    // /findbyrating is the only ranked list in AniPub. Narrow by status where
-    // the filter calls for it; bypopularity/favorite return the full list.
-    return httpGet('/api/findbyrating', { signal }).then((raw) => {
-      const all = toList(raw).map(toSummary)
+    // /api/sort is AniPub's ranked (top-rated) list — there is no separate
+    // popularity / airing-sort endpoint, and list items carry no `Status`, so
+    // an "airing" or "popularity" rail is best surfaced as the ranked list
+    // itself. Only "upcoming" still narrows on status (and may be short).
+    return httpGet('/api/sort', { signal }).then((raw) => {
+      const all = toSortList(raw).map(toSummary)
       const narrowed =
-        filter === 'airing'
-          ? all.filter((a) => a.airing)
-          : filter === 'upcoming'
-            ? all.filter((a) => a.status === 'Not yet aired')
-            : all
+        filter === 'upcoming' ? all.filter((a) => a.status === 'Not yet aired') : all
       return paginate(narrowed, page, 24)
     })
   },
 
   getSeasonNow(page = 1, signal?: AbortSignal): Promise<Paginated<AnimeSummary>> {
-    // AniPub has no explicit season filter. Approximate "this season" as
-    // currently-airing titles that premiered in the current calendar year.
-    const { year } = currentSeason()
-    return httpGet('/api/findbyrating', { signal }).then((raw) => {
-      const matching = toList(raw)
-        .map(toSummary)
-        .filter((a) => a.airing && (a.year ?? 0) === year)
-      return paginate(matching, page, 24)
+    // AniPub exposes no season metadata (list items carry no `Aired` /
+    // `Premiered`), so the "this season" rail is approximated with the ranked
+    // (/api/sort) list. Sourcing it from the same top-rated list keeps the hero
+    // banner and the seasonal rail populated rather than empty.
+    return httpGet('/api/sort', { signal }).then((raw) => {
+      return paginate(toSortList(raw).map(toSummary), page, 24)
     })
   },
 
   /**
-   * AniPub has no airing-schedule endpoint → always resolves to an empty
-   * list. The Schedule page handles the empty state gracefully.
+   * AniPub has no airing-schedule endpoint. "Latest episodes" is proxied with
+   * the most-recently-added show (`/api/getlast`) placed first, then the ranked
+   * list (`/api/sort`) to fill the rail. Never hard-fails: degrades to whatever
+   * the two endpoints return (possibly just the ranked list).
    */
   getSchedule(
     _day?: string,
-    _signal?: AbortSignal,
+    signal?: AbortSignal,
     _range?: { start: number; end: number },
   ): Promise<SimpleList<ScheduleEntry>> {
-    return Promise.resolve({ data: [] as ScheduleEntry[] })
+    return (async () => {
+      try {
+        const [lastRaw, sortRaw] = await Promise.all([
+          httpGet('/api/getlast', { signal }).catch(() => null),
+          httpGet('/api/sort', { signal }).catch(() => null),
+        ])
+        const ranked = toSortList(sortRaw)
+        const byId = new Map<number, APBase>()
+        for (const it of ranked) byId.set(idOf(it), it)
+        const ordered: APBase[] = []
+        const latestId = toInt(lastRaw)
+        if (latestId != null && latestId > 0) {
+          let latest = byId.get(latestId) ?? null
+          if (!latest) {
+            try { latest = await detailOf(latestId, signal) } catch { latest = null }
+          }
+          if (latest) ordered.push(latest)
+        }
+        for (const it of ranked) {
+          if (idOf(it) === latestId) continue
+          ordered.push(it)
+          if (ordered.length >= 24) break
+        }
+        return { data: ordered.map(toScheduleEntry) }
+      } catch {
+        return { data: [] as ScheduleEntry[] }
+      }
+    })()
   },
 
   getUpcoming(limit = 10, signal?: AbortSignal): Promise<SimpleList<UpcomingAnime>> {

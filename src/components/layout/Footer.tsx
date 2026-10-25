@@ -7,7 +7,7 @@ export function Footer() {
   const year = new Date().getFullYear()
 
   return (
-    <footer className="mt-10 border-t border-night-700/70 bg-night-900/60">
+    <footer className="mt-10 border-t border-night-700/70 bg-night-900">
       <div className="container-page flex flex-col items-center gap-3 py-10 text-center">
         <div className="flex items-center gap-2">
           <BrandMark size="sm" />

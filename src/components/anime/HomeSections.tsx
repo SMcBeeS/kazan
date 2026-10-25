@@ -58,6 +58,14 @@ function ContinueCard({
   onRemove: () => void
 }) {
   const { t } = useI18n()
+  // Cache entries may store relative AniPub paths (e.g. "/files/...") that 404
+  // if used directly. Sanitize them to absolute URLs before rendering, and fall
+  // back to the existing "?" placeholder when there is no image at all.
+  const finalImageUrl = coverImage
+    ? coverImage.startsWith('http')
+      ? coverImage
+      : 'https://anipub.org' + coverImage
+    : ''
   const episodeLabel =
     totalEpisodes != null
       ? `${t('home.episodeShort', { n: episode })} / ${totalEpisodes}`
@@ -70,9 +78,9 @@ function ContinueCard({
         className="block overflow-hidden rounded-2xl border border-night-700/70 bg-night-850 transition group-hover:-translate-y-1 group-hover:border-slate-400/60 group-hover:shadow-glow-accent"
       >
         <div className="relative aspect-[16/10] overflow-hidden">
-          {coverImage ? (
+          {finalImageUrl ? (
             <img
-              src={coverImage}
+              src={finalImageUrl}
               alt={title}
               loading="lazy"
               decoding="async"

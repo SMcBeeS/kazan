@@ -1,30 +1,26 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useI18n } from '../context/LanguageContext'
 import { useLibrary } from '../context/LibraryContext'
 import { useAuth } from '../context/AuthContext'
-import { useSettings } from '../context/SettingsContext'
-import { anilist } from '../lib/anipub'
+import { anilist, getEpisodeLink } from '../lib/anipub'
 import { addToHistory, getComments, postComment } from '../lib/database'
 import type { Comment } from '../lib/database'
 import { useAsync } from '../hooks/useAsync'
-import { resolveEpisodeSources } from '../lib/videoSources'
 import { coverImage, formatLabel, formatRating, isMovie } from '../lib/utils'
 import type { Episode } from '../lib/types'
 import { Loading, Spinner } from '../components/ui/Feedback'
 import { ErrorState } from '../components/ui/States'
-import { VideoPlayer } from '../components/ui/VideoPlayer'
-import type { SkipSegments } from '../components/ui/VideoPlayer'
-import { ArrowLeft, SendIcon, StarIcon, SubtitlesIcon, ClockIcon } from '../components/icons'
+import { AlertIcon, ArrowLeft, SendIcon, StarIcon, SubtitlesIcon, ClockIcon } from '../components/icons'
 
 /**
  * WatchPage — episode player screen.
  *
- * Resolves the authorized video sources for the episode via lib/videoSources,
- * renders the reusable VideoPlayer (source/quality/subtitle selection,
- * fullscreen, next/prev, local progress), records watch history, and shows a
- * side list of episodes for quick switching.
+ * Resolves the episode's AniPub embed link by native id and renders it in an *
+ * inline <iframe>, records watch history, and shows a side list of episodes
+ * for quick switching.
  */
+
 export default function WatchPage() {
   const { id, episode } = useParams<{ id: string; episode: string }>()
   const animeId = Number(id)
@@ -32,39 +28,27 @@ export default function WatchPage() {
   const { t, lang } = useI18n()
   const { recordHistory, recordContinue } = useLibrary()
   const { user } = useAuth()
-  const { settings } = useSettings()
   const navigate = useNavigate()
-
+  const [isDub, setIsDub] = useState(false)
   const anime = useAsync((s) => anilist.getAnime(animeId, s).then((r) => r.data), [animeId])
   const episodes = useAsync((s) => anilist.getEpisodes(animeId, 1, s).then((r) => r.data), [animeId])
-
-  const sources = useMemo(
-    () => resolveEpisodeSources({ animeId, episode: episodeNumber }),
+  // Resolve the playable link by native AniPub id. Routed through the strict
+  // queue (32s spacing, first request immediate) and never caches a failure, so
+  // a transient 429 always resolves to a fresh retry instead of a stuck
+  // "Episode Unavailable" state.
+  const stream = useAsync(
+    (s) => getEpisodeLink(animeId, episodeNumber, s),
     [animeId, episodeNumber],
   )
-
-  // Intro/outro skip segments for the current episode. Production wiring would
-  // hit the AniSkip.io API (`/skip/{mal_id}/{episode}`); until an API key is
-  // configured we fall back to a deterministic mock so the auto-skip feature
-  // is demonstrable (intro ~5min in, outro ~24min in of a ~25min episode).
-  const skipSegments = useMemo<SkipSegments | null>(() => {
-    // TODO: replace with live AniSkip fetch when ANISKIP_API_KEY is set.
-    return {
-      intro: { start: 300, end: 355 },
-      outro: { start: 1440, end: 1500 },
-    }
-  }, [])
-
-  // For long-running series AniList leaves `episodes` null, so fall back to the
-  // aired count derived from nextAiringEpisode (see lib/anilist.getEpisodes).
-  const totalEpisodes =
-    anime.data?.episodes ??
-    (anime.data?.nextAiringEpisode ? Math.max(0, anime.data.nextAiringEpisode.episode - 1) : null) ??
-    episodes.data?.length ??
-    null
-  const hasPrev = episodeNumber > 1
-  const hasNext = totalEpisodes == null ? true : episodeNumber < totalEpisodes
-
+  // Total series length — used for the "Ep N / M" label and (indirectly) the
+  // auto-complete detection on the detail page. We deliberately only trust the
+  // *true* API total (`anime.data.episodes`). The previous implementation fell
+  // back to the currently-aired count (nextAiringEpisode) and, worse, to
+  // `episodes.data.length` — which was the single paginated page that used to
+  // be hard-capped at 50 rows, so a long series would "complete" at episode 50.
+  // If the API total is unknown (null) we keep it null so completion never
+  // triggers on a guess.
+  const totalEpisodes = anime.data?.episodes ?? null
   // Record this view in the *database* watch history for signed-in users
   // (background fire-and-forget; the local LibraryContext call below still runs
   // for everyone so the "Continue Watching" carousel works offline).
@@ -73,7 +57,6 @@ export default function WatchPage() {
     void addToHistory(anime.data.mal_id, episodeNumber)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anime.data?.mal_id, episodeNumber, user])
-
   // Record this view in watch history + the "Continue Watching" carousel (#10).
   // Also feed the new-episode notification engine the moment an episode is
   // opened: if the title is a favorite, raise a notification when this episode
@@ -97,7 +80,6 @@ export default function WatchPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anime.data?.mal_id, episodeNumber])
-
   if (anime.loading) {
     return (
       <div className="container-page py-10">
@@ -105,7 +87,6 @@ export default function WatchPage() {
       </div>
     )
   }
-
   if (anime.error || !anime.data) {
     return (
       <div className="container-page py-10">
@@ -113,23 +94,36 @@ export default function WatchPage() {
       </div>
     )
   }
-
   const detail = anime.data
-  const goPrev = () => hasPrev && navigate(`/watch/${animeId}/${episodeNumber - 1}`)
-  const goNext = () => hasNext && navigate(`/watch/${animeId}/${episodeNumber + 1}`)
-
-  // Auto-advance when the video ends (only when the setting is on).
-  const handleEnded = () => {
-    if (settings.autoNextEpisode && hasNext) {
-      navigate(`/watch/${animeId}/${episodeNumber + 1}`)
+  // AniPub embed links sometimes come back prefixed with "src=..."; strip the
+  // prefix before handing the URL to the iframe so it points at the page only.
+  const rawLink = stream.data?.url ?? ''
+  const cleanLink = rawLink.replace(/^src=/, '')
+  // Enforce the Sub/Dub preference on the embed link. We split the query string
+  // off manually (rather than `split('?')`) so extra `?`s never strand an
+  // empty base, then only rewrite the tail when the base URL *already* ends in
+  // a `/sub` or `/dub` segment. Appending either segment to a base that never
+  // had one (as the old code did) produced a malformed embed URL — the single
+  // most likely cause of the blank white player. When there's nothing to
+  // rewrite we keep the link untouched so it points at a valid page.
+  let finalLink = cleanLink
+  if (cleanLink && /^https?:\/\//i.test(cleanLink)) {
+    const qIdx = cleanLink.indexOf('?')
+    const baseUrl = qIdx >= 0 ? cleanLink.slice(0, qIdx) : cleanLink
+    const queryParams = qIdx >= 0 ? cleanLink.slice(qIdx) : ''
+    if (/(^|\/)(sub|dub)\/?$/i.test(baseUrl)) {
+      const strippedBase = baseUrl.replace(/\/(sub|dub)\/?$/i, '')
+      finalLink = `${strippedBase}/${isDub ? 'dub' : 'sub'}${queryParams}`
     }
   }
-
+  // Only hand the URL to an <iframe> when it is a real, well-formed link. An
+  // empty / malformed `finalLink` renders as a blank white box, so we guard
+  // and fall back to a dark placeholder instead.
+  const hasValidLink = finalLink.length > 0 && /^https?:\/\//i.test(finalLink)
   // Find metadata for the currently playing episode.
   const currentEpisode = episodes.data?.find((ep) => ep.mal_id === episodeNumber) ?? null
-
   return (
-    <div className="container-page py-6">
+    <div className="container-page py-6 pb-32">
       <button
         type="button"
         onClick={() => navigate(-1)}
@@ -138,21 +132,77 @@ export default function WatchPage() {
         <ArrowLeft className="h-4 w-4 flip-rtl" />
         {t('watch.backToAnime')}
       </button>
-
       <div className={`grid gap-6${detail.format === 'MOVIE' ? '' : ' lg:grid-cols-[1fr_320px]'}`}>
         {/* Player + info */}
         <div>
-          <VideoPlayer
-            sources={sources}
-            animeId={animeId}
-            episode={episodeNumber}
-            onPrev={hasPrev ? goPrev : undefined}
-            onNext={hasNext ? goNext : undefined}
-            onEnded={handleEnded}
-            skipSegments={skipSegments}
-            poster={coverImage(detail)}
-          />
-
+          {stream.loading ? (
+            <div className="flex aspect-video w-full items-center justify-center rounded-2xl border border-night-800 bg-night-900/60">
+              <Spinner className="h-8 w-8 text-slate-300" />
+            </div>
+          ) : stream.error ? (
+            <div className="relative flex aspect-video w-full flex-col items-center justify-center overflow-hidden rounded-2xl border border-dashed border-night-600 bg-night-900/70 p-6 text-center">
+              <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(53,87,246,0.08),transparent_60%)]" />
+              <div className="relative z-10 max-w-md">
+                <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/15 text-red-400">
+                  <AlertIcon className="h-6 w-6" />
+                </div>
+                <h3 className="text-lg font-bold text-white">{t('watch.sourceUnavailable')}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-slate-400">{stream.error}</p>
+                <button onClick={stream.reload} className="btn-primary mt-4">
+                  {t('common.retry')}
+                </button>
+              </div>
+            </div>
+          ) : !hasValidLink ? (
+          <div className="relative flex aspect-video w-full flex-col items-center justify-center gap-3 overflow-hidden rounded-lg border border-night-800 bg-night-900/80 p-6 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/5 text-slate-500">
+              <AlertIcon className="h-6 w-6" />
+            </div>
+            <p className="max-w-md text-sm leading-relaxed text-slate-400">{t('watch.emptySource')}</p>
+          </div>
+          ) : (
+          <>
+            <div className="relative w-full overflow-hidden rounded-lg bg-black aspect-video">
+              <iframe
+                src={finalLink}
+                className="absolute top-0 left-0 h-full w-full border-0"
+                style={{ colorScheme: 'dark' }}
+                allowFullScreen
+                allow="autoplay; fullscreen"
+                title={detail.title_english || detail.title || `Episode ${episodeNumber}`}
+              />
+            </div>
+            {/* Sub/Dub track selector, attached to the player in normal flow */}
+            <div className="mt-3 flex justify-end">
+              <div className="flex rounded-full border border-white/10 bg-night-900/70 p-0.5 backdrop-blur-sm">
+                <button
+                  type="button"
+                  onClick={() => setIsDub(false)}
+                  aria-pressed={!isDub}
+                  className={
+                    !isDub
+                      ? 'rounded-full bg-white px-3 py-1 text-xs font-semibold text-night-900 transition'
+                      : 'rounded-full px-3 py-1 text-xs font-semibold text-slate-300 transition hover:text-white'
+                  }
+                >
+                  {t('watch.sub')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsDub(true)}
+                  aria-pressed={isDub}
+                  className={
+                    isDub
+                      ? 'rounded-full bg-white px-3 py-1 text-xs font-semibold text-night-900 transition'
+                      : 'rounded-full px-3 py-1 text-xs font-semibold text-slate-300 transition hover:text-white'
+                  }
+                >
+                  {t('watch.dub')}
+                </button>
+              </div>
+            </div>
+          </>
+          )}
           {/* Series + current episode metadata */}
           <div className="mt-4 flex gap-4">
             <Link to={`/anime/${animeId}`} className="hidden h-28 w-20 shrink-0 overflow-hidden rounded-lg border border-night-700 sm:block">
@@ -206,11 +256,12 @@ export default function WatchPage() {
               )}
             </div>
           </div>
-
-          {/* Episode discussion */}
-          <EpisodeDiscussion animeId={animeId} episodeNumber={episodeNumber} isMovie={detail.format === 'MOVIE'} />
+          {/* Episode discussion — wrap with a large bottom margin so the footer
+              is forced well down the page on every viewport size (#footer gap). */}
+          <div className="mb-32">
+            <EpisodeDiscussion animeId={animeId} episodeNumber={episodeNumber} isMovie={detail.format === 'MOVIE'} />
+          </div>
         </div>
-
         {/* Episode sidebar (hidden for movies) */}
         {detail.format !== 'MOVIE' && (
           <EpisodeSidebar
@@ -223,8 +274,7 @@ export default function WatchPage() {
         )}
       </div>
     </div>
-  )
-}
+  )}
 
 /* ---------------------------- episode sidebar ---------------------------- */
 
@@ -234,24 +284,13 @@ export default function WatchPage() {
 function formatCommentDate(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
-}
-
-/**
- * EpisodeDiscussion — per-episode comment box rendered below the player.
- * Comments are persisted to Supabase (see lib/database.getComments / postComment)
- * and render the poster's avatar, username + timestamp. Guests see a
- * "Log in to comment" prompt instead of the input.
- */
-function EpisodeDiscussion({ animeId, episodeNumber, isMovie }: { animeId: number; episodeNumber: number; isMovie?: boolean }) {
+  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}/** * EpisodeDiscussion — per-episode comment box rendered below the player. * Comments are persisted to Supabase (see lib/database.getComments / postComment) * and render the poster's avatar, username + timestamp. Guests see a * "Log in to comment" prompt instead of the input. */function EpisodeDiscussion({ animeId, episodeNumber, isMovie }: { animeId: number; episodeNumber: number; isMovie?: boolean }) {
   const { t } = useI18n()
   const { user, email, supabaseConfigured, openAuthModal } = useAuth()
   const [draft, setDraft] = useState('')
   const [comments, setComments] = useState<Comment[] | null>(null)
   const [posting, setPosting] = useState(false)
-
   const signedIn = !!user
-
   // Load this episode's comments on mount / when the episode changes.
   useEffect(() => {
     if (!supabaseConfigured || !user) {
@@ -269,13 +308,11 @@ function EpisodeDiscussion({ animeId, episodeNumber, isMovie }: { animeId: numbe
       cancelled = true
     }
   }, [animeId, episodeNumber, user, supabaseConfigured])
-
   // Wipe the draft when the session drops so the previous user's text
   // never lingers (data-ghosting on logout).
   useEffect(() => {
     if (!user) setDraft('')
   }, [user])
-
   const post = async () => {
     const text = draft.trim()
     if (!text || !user || posting) return
@@ -298,7 +335,6 @@ function EpisodeDiscussion({ animeId, episodeNumber, isMovie }: { animeId: numbe
     setComments((prev) => (prev ? [me, ...prev] : [me]))
     setDraft('')
   }
-
   return (
     <div className="mt-5 rounded-xl border border-night-700/70 bg-night-850/50 p-3">
       <div className="mb-3 flex items-center gap-2">
@@ -309,7 +345,6 @@ function EpisodeDiscussion({ animeId, episodeNumber, isMovie }: { animeId: numbe
             : `${t('watch.discussThisEpisode')} ${t('watch.episode')} ${episodeNumber}`}
         </h2>
       </div>
-
       {signedIn ? (
         <div className="flex items-center gap-2">
           <input
@@ -346,7 +381,6 @@ function EpisodeDiscussion({ animeId, episodeNumber, isMovie }: { animeId: numbe
           </button>
         </div>
       )}
-
       {comments === null ? (
         <div className="mt-3 flex justify-center text-slate-500">
           <Spinner className="h-5 w-5" />
@@ -381,22 +415,19 @@ function EpisodeDiscussion({ animeId, episodeNumber, isMovie }: { animeId: numbe
         </div>
       )}
     </div>
-  )
-}
+  )}
 
 function EpisodeSidebar({
   animeId,
   current,
   episodes,
   loading,
-  error,
-}: {
+  error,}: {
   animeId: number
   current: number
   episodes?: Episode[] | null
   loading: boolean
-  error: string | null
-}) {
+  error: string | null}) {
   const { t } = useI18n()
   return (
     <aside className="card-surface flex max-h-[70vh] flex-col p-3">
@@ -404,19 +435,15 @@ function EpisodeSidebar({
         <SubtitlesIcon className="h-4 w-4 text-slate-300" />
         <h2 className="text-sm font-bold text-white">{t('watch.episodes')}</h2>
       </div>
-
       <div className="thin-scrollbar -mx-1 flex-1 space-y-1.5 overflow-y-auto px-1">
         {loading &&
           Array.from({ length: 8 }).map((_, i) => (
             <div key={i} className="h-12 animate-pulse rounded-lg bg-night-800" />
           ))}
-
         {error && <p className="px-1 py-2 text-xs text-red-400">{error}</p>}
-
         {!loading && (!episodes || episodes.length === 0) && (
           <p className="px-1 py-2 text-xs text-slate-500">{t('detail.noEpisodes')}</p>
         )}
-
         {episodes?.map((ep) => {
           const active = ep.mal_id === current
           const upcoming = ep.upcoming === true
@@ -469,6 +496,4 @@ function EpisodeSidebar({
         })}
       </div>
     </aside>
-  )
-}
-
+  )}
